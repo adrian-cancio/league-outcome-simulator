@@ -4,7 +4,7 @@
 Use Python for all code examples.
 
 ## Communication
-Explain the code and logic in English, but keep responses concise and clear in Spanish.
+Explain the code and logic in English, but keep responses concise and clear.
 
 ## Style
 - Follow PEP 8 guidelines for Python code.
