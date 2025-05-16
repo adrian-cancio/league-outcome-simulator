@@ -1,3 +1,5 @@
 .hide
 venv
 __pycache__
+target/
+rust_sim*.{so,pyd,dll}

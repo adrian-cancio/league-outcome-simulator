@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.0"]
+build-backend = "maturin"
+
+[project]
+name = "rust_sim"
+version = "0.1.0"
+description = "Rust-accelerated simulation for football-probs"
+authors = [{name = "Football Probs Team"}]
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.7"
+
+[tool.maturin]
+bindings = "pyo3"

@@ -1,7 +1,14 @@
 from models import DixonColesModel
+try:
+    from rust_sim import simulate_season as rust_simulate_season
+except ImportError:
+    rust_simulate_season = None
 
 def simulate_season(base_table, fixtures, home_table=None, away_table=None):
     """Simulate the remainder of the season based on current standings and fixtures."""
+    # Use Rust-accelerated simulation if available
+    if rust_simulate_season is not None:
+        return rust_simulate_season(base_table, fixtures)
     standings = {row[0]: {"PTS": int(row[7]), "GF": int(row[5]), "GA": int(row[6]), "M": int(row[1])} for row in base_table[1:]}
     dc_model = DixonColesModel(rho=-0.1, max_goals=8)
     dc_model.calculate_lambdas(base_table, home_table, away_table)

@@ -87,8 +87,8 @@ LEAGUES = {
 
 CURRENT_YEAR = datetime.now().year
 
-MAX_SIMULATIONS = 10_000  # Maximum number of simulations
-MAX_SIMULATION_TIME_SECONDS = 10  # Maximum simulation time in seconds
+MAX_SIMULATIONS = 1_000_000  # Maximum number of simulations
+MAX_SIMULATION_TIME_SECONDS = 60  # Maximum simulation time in seconds
 HOME_ADVANTAGE = 1.25  # Home advantage factor (1.0 = neutral, higher = more advantage)
 
 # Color utility functions - MOVED HERE FROM THE BOTTOM OF THE FILE
