@@ -1078,9 +1078,18 @@ def main():
     if not fixtures:
         print("❌ Could not get remaining fixtures.")
         return
+    # Prefetch home and away league tables and team colors, then close driver
+    print("🔄 Getting home league table...")
+    home_table = client.get_home_league_table(tournament_id, season_id)
+    print("🔄 Getting away league table...")
+    away_table = client.get_away_league_table(tournament_id, season_id)
+    print("🔄 Fetching team colors for visualization...")
+    team_colors = get_team_colors_from_standings(tournament_id, season_id)
+    # Close the Selenium driver now that all API data is fetched
+    cleanup_global_driver()
 
     print("🔄 Simulating seasons...")
-    results = simulate_season(base_table, fixtures)
+    results = simulate_season(base_table, fixtures, home_table, away_table)
     print("📈 Simulation complete. Results:")
     for pos, (team, stats) in enumerate(results, 1):
         print(f"{pos}. {team} - {stats['PTS']} pts")
@@ -1094,7 +1103,7 @@ def main():
             print("⏳ Maximum simulation time reached. Stopping early.")
             break
 
-        simulated_results = simulate_season(base_table, fixtures)
+        simulated_results = simulate_season(base_table, fixtures, home_table, away_table)
         for pos, (team, _) in enumerate(simulated_results, 1):
             position_counts[team][pos] += 1
 
