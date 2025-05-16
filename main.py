@@ -1,8 +1,11 @@
 import time
 import json
+import math  # Add math module for factorial function
 from datetime import datetime
 from collections import defaultdict, Counter
 from numpy.random import poisson
+import numpy as np  # Añadimos numpy para cálculos de optimización
+from scipy import optimize  # Necesario para la estimación de ρ
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -11,6 +14,39 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import random  # Added for random color generation
 
+
+# Variable global para el driver de Selenium
+GLOBAL_DRIVER = None
+
+def initialize_global_driver():
+    """Inicializa el driver global de Selenium si no existe"""
+    global GLOBAL_DRIVER
+    if GLOBAL_DRIVER is None:
+        print("🔄 Inicializando driver global de Selenium...")
+        chrome_options = Options()
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("user-agent=Mozilla/5.0")
+        service = Service(log_path="nul")
+        try:
+            GLOBAL_DRIVER = webdriver.Chrome(service=service, options=chrome_options)
+            return True
+        except Exception as e:
+            print(f"❌ Error inicializando driver global: {e}")
+            GLOBAL_DRIVER = None
+            return False
+    return True
+
+def cleanup_global_driver():
+    """Cierra el driver global al finalizar el programa"""
+    global GLOBAL_DRIVER
+    if GLOBAL_DRIVER is not None:
+        try:
+            GLOBAL_DRIVER.quit()
+        except:
+            pass
+        GLOBAL_DRIVER = None
 
 LEAGUES = {
     1: (17, "Premier League"),
@@ -41,8 +77,8 @@ LEAGUES = {
 
 CURRENT_YEAR = datetime.now().year
 
-MAX_SIMULATIONS = 100_000  # Maximum number of simulations
-MAX_SIMULATION_TIME_SECONDS = 10  # Maximum simulation time in seconds
+MAX_SIMULATIONS = 10_000  # Maximum number of simulations
+MAX_SIMULATION_TIME_SECONDS = 120  # Maximum simulation time in seconds
 HOME_ADVANTAGE = 1.25  # Home advantage factor (1.0 = neutral, higher = more advantage)
 
 # Color utility functions - MOVED HERE FROM THE BOTTOM OF THE FILE
@@ -174,35 +210,121 @@ def is_good_contrast(color1, color2, threshold=120):
     return brightness_diff > 70 or color_diff > threshold
 
 def fetch_json_with_selenium(url):
+    """Fetch JSON data using the global Selenium driver"""
+    global GLOBAL_DRIVER
     print(f"🔄 Getting data from: {url}")
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("user-agent=Mozilla/5.0")
-    service = Service(log_path="nul")
+    
+    # Intentar inicializar el driver global si no existe
+    if GLOBAL_DRIVER is None:
+        if not initialize_global_driver():
+            print("❌ No se pudo inicializar el driver global")
+            return None
+    
     try:
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.get(url)
+        GLOBAL_DRIVER.get(url)
         time.sleep(3)
-        body = driver.find_element("tag name", "body").text
-        driver.quit()
+        body = GLOBAL_DRIVER.find_element("tag name", "body").text
     except Exception as e:
-        print(f"❌ Error using Selenium: {e}")
-        return None
+        print(f"❌ Error using global driver: {e}")
+        # Intentar reinicializar el driver global
+        cleanup_global_driver()
+        if not initialize_global_driver():
+            print("❌ No se pudo reinicializar el driver global")
+            return None
+        
+        # Segundo intento con nuevo driver
+        try:
+            GLOBAL_DRIVER.get(url)
+            time.sleep(3)
+            body = GLOBAL_DRIVER.find_element("tag name", "body").text
+        except Exception as e2:
+            print(f"❌ Error en segundo intento: {e2}")
+            return None
 
     try:
         return json.loads(body)
     except json.JSONDecodeError:
-        print("❌ Error decoding JSON.")
+        print("❌ Error decodificando JSON.")
         return None
 
 class SofaScoreClient:
     BASE_URL = "https://api.sofascore.com/api/v1"
-
+    
+    def __init__(self):
+        """Initialize the client with a reference to the global Selenium driver"""
+        self.driver = None
+        # No hay que crear un nuevo driver, solo asegurarse que existe el global
+        self.setup_driver()
+        # Diccionarios para almacenar los lambdas calculados
+        self.team_lambdas = {
+            'home': {},    # λ_home por equipo
+            'away': {},    # λ_away por equipo
+            'global': {},  # λ_global por equipo
+        }
+    
+    def setup_driver(self):
+        """Set up a reference to the global Selenium driver"""
+        global GLOBAL_DRIVER
+        print("🔄 Usando driver global de Selenium para todas las llamadas API...")
+        
+        # Inicializar el driver global si no existe
+        if GLOBAL_DRIVER is None:
+            initialize_global_driver()
+            
+        # Referenciar al driver global
+        self.driver = GLOBAL_DRIVER
+    
+    def fetch_json(self, url):
+        """Fetch JSON data from an URL using the global driver"""
+        print(f"🔄 Getting data from: {url}")
+        
+        if self.driver is None:
+            print("⚠️ Driver not initialized, attempting to use global driver...")
+            self.setup_driver()
+            if self.driver is None:
+                print("❌ Failed to initialize driver, falling back to fetch_json_with_selenium")
+                return fetch_json_with_selenium(url)
+        
+        try:
+            self.driver.get(url)
+            time.sleep(2)  # Reduced wait time since driver is warm
+            body = self.driver.find_element("tag name", "body").text
+            
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                print("❌ Error decoding JSON.")
+                return None
+        except Exception as e:
+            print(f"❌ Error using Selenium driver: {e}")
+            print("⚠️ Reinitializando driver global...")
+            
+            # Reinicializar el driver global
+            cleanup_global_driver()
+            initialize_global_driver()
+            self.driver = GLOBAL_DRIVER
+            
+            # Seguir usando fetch_json_with_selenium si la reinicialización falla
+            if self.driver is None:
+                return fetch_json_with_selenium(url)
+            
+            # Segundo intento con el driver global reinicializado
+            try:
+                self.driver.get(url)
+                time.sleep(3)
+                body = self.driver.find_element("tag name", "body").text
+                return json.loads(body)
+            except Exception as e2:
+                print(f"❌ Error en segundo intento: {e2}")
+                return fetch_json_with_selenium(url)
+    
+    def __del__(self):
+        """Nothing to clean up since we're using the global driver"""
+        pass
+    
     def get_current_season_id(self, tournament_id):
         url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/seasons"
-        data = fetch_json_with_selenium(url)
+        data = self.fetch_json(url)
         if (data and 'seasons' in data):
             seasons = sorted(data['seasons'], key=lambda x: x['id'], reverse=True)
             if seasons:
@@ -210,18 +332,35 @@ class SofaScoreClient:
         return None
 
     def get_league_table(self, tournament_id, season_id):
+        """
+        Obtiene tabla general del torneo y calcula λ_global para cada equipo.
+        λ_global = goles anotados totales / partidos jugados
+        """
         url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/standings/total"
-        data = fetch_json_with_selenium(url)
+        data = self.fetch_json(url)
         if data and 'standings' in data and data['standings']:
             rows = [['Team', 'M', 'W', 'D', 'L', 'G', 'GA', 'PTS']]
+            
+            # Recorrer cada equipo y calcular su lambda global
             for row in data['standings'][0]['rows']:
+                team_name = row['team']['name']
+                matches = row['matches']
+                goals_for = row['scoresFor']
+                
+                # Calcular λ_global solo si han jugado partidos
+                if matches > 0:
+                    self.team_lambdas['global'][team_name] = goals_for / matches
+                else:
+                    # Valor predeterminado para equipos sin partidos
+                    self.team_lambdas['global'][team_name] = 1.0
+                
                 rows.append([
-                    row['team']['name'],
-                    row['matches'],
+                    team_name,
+                    matches,
                     row['wins'],
                     row['draws'],
                     row['losses'],
-                    row['scoresFor'],
+                    goals_for,
                     row['scoresAgainst'],
                     row['points'],
                 ])
@@ -229,19 +368,35 @@ class SofaScoreClient:
         return None
         
     def get_home_league_table(self, tournament_id, season_id):
-        """Get standings for home games only"""
+        """
+        Obtiene tabla de partidos en casa y calcula λ_home para cada equipo.
+        λ_home = goles anotados en casa / partidos jugados en casa
+        """
         url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/standings/home"
-        data = fetch_json_with_selenium(url)
+        data = self.fetch_json(url)
         if data and 'standings' in data and data['standings']:
             rows = [['Team', 'M', 'W', 'D', 'L', 'G', 'GA', 'PTS']]
+            
+            # Recorrer cada equipo y calcular su lambda home
             for row in data['standings'][0]['rows']:
+                team_name = row['team']['name']
+                matches = row['matches']
+                goals_for = row['scoresFor']
+                
+                # Calcular λ_home solo si han jugado partidos en casa
+                if matches > 0:
+                    self.team_lambdas['home'][team_name] = goals_for / matches
+                else:
+                    # Valor predeterminado para equipos sin partidos en casa
+                    self.team_lambdas['home'][team_name] = 1.0
+                
                 rows.append([
-                    row['team']['name'],
-                    row['matches'],
+                    team_name,
+                    matches,
                     row['wins'],
                     row['draws'],
                     row['losses'],
-                    row['scoresFor'],
+                    goals_for,
                     row['scoresAgainst'],
                     row['points'],
                 ])
@@ -249,19 +404,35 @@ class SofaScoreClient:
         return None
         
     def get_away_league_table(self, tournament_id, season_id):
-        """Get standings for away games only"""
+        """
+        Obtiene tabla de partidos fuera de casa y calcula λ_away para cada equipo.
+        λ_away = goles anotados fuera / partidos jugados fuera
+        """
         url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/standings/away"
-        data = fetch_json_with_selenium(url)
+        data = self.fetch_json(url)
         if data and 'standings' in data and data['standings']:
             rows = [['Team', 'M', 'W', 'D', 'L', 'G', 'GA', 'PTS']]
+            
+            # Recorrer cada equipo y calcular su lambda away
             for row in data['standings'][0]['rows']:
+                team_name = row['team']['name']
+                matches = row['matches']
+                goals_for = row['scoresFor']
+                
+                # Calcular λ_away solo si han jugado partidos fuera
+                if matches > 0:
+                    self.team_lambdas['away'][team_name] = goals_for / matches
+                else:
+                    # Valor predeterminado para equipos sin partidos fuera
+                    self.team_lambdas['away'][team_name] = 1.0
+                
                 rows.append([
-                    row['team']['name'],
-                    row['matches'],
+                    team_name,
+                    matches,
                     row['wins'],
                     row['draws'],
                     row['losses'],
-                    row['scoresFor'],
+                    goals_for,
                     row['scoresAgainst'],
                     row['points'],
                 ])
@@ -283,7 +454,7 @@ class SofaScoreClient:
             url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/events/next/{page}"
             print(f"    Getting page {page} of fixtures...")
             
-            data = fetch_json_with_selenium(url)
+            data = self.fetch_json(url)
             
             # Check if we got a valid response with events
             if not data or 'events' not in data or not data['events']:
@@ -380,9 +551,44 @@ def simulate_match(xg_home, xg_away):
     
     return home_goals, away_goals
 
+def dixon_coles_simulate_match(lambda_home, lambda_away, rho):
+    """
+    Simula un partido usando el modelo Dixon-Coles en lugar de Poisson independientes.
+    Muestrea de la distribución bivariada Dixon-Coles.
+    
+    Args:
+        lambda_home: Tasa esperada de goles del equipo local (λ_home)
+        lambda_away: Tasa esperada de goles del equipo visitante (λ_away)
+        rho: Parámetro de corrección (correlación entre resultados locales y visitantes)
+        
+    Returns:
+        Tupla de goles (goles_local, goles_visitante)
+    """
+    # Máximo de goles a considerar (ajustar según la liga)
+    max_goals = 10
+    
+    # Crear matriz de probabilidad para todos los posibles resultados
+    prob_matrix = np.zeros((max_goals+1, max_goals+1))
+    for i in range(max_goals+1):
+        for j in range(max_goals+1):
+            prob_matrix[i, j] = dixon_coles_probability(i, j, lambda_home, lambda_away, rho)
+    
+    # Normalizar para asegurar que sume 1
+    prob_matrix = prob_matrix / np.sum(prob_matrix)
+    
+    # Aplanar la matriz y obtener el índice del resultado muestreado
+    flat_probs = prob_matrix.flatten()
+    flat_index = np.random.choice(len(flat_probs), p=flat_probs)
+    
+    # Convertir el índice plano de nuevo a coordenadas de la matriz
+    home_goals = flat_index // (max_goals+1)
+    away_goals = flat_index % (max_goals+1)
+    
+    return home_goals, away_goals
+
 def simulate_season(base_table, fixtures, home_table=None, away_table=None):
     """Simulate the remainder of the season based on current standings and remaining fixtures,
-    using home/away specific data when available
+    using Dixon-Coles model for more accurate match simulation
     
     Args:
         base_table: Overall league standings table
@@ -397,6 +603,28 @@ def simulate_season(base_table, fixtures, home_table=None, away_table=None):
     home_stats = {}
     away_stats = {}
     
+    # Calcular los lambdas para cada equipo
+    team_lambdas = {
+        'home': {},    # λ_home por equipo
+        'away': {},    # λ_away por equipo
+        'global': {},  # λ_global por equipo
+    }
+    
+    # Crear lista para recolectar datos de partidos históricos
+    historic_matches = []
+    
+    # Procesar lambdas globales
+    for row in base_table[1:]:
+        team_name = row[0]
+        matches = int(row[1])
+        goals_for = int(row[5])
+        
+        # Calcular λ_global
+        if matches > 0:
+            team_lambdas['global'][team_name] = goals_for / matches
+        else:
+            team_lambdas['global'][team_name] = 1.0
+    
     if home_table:
         for row in home_table[1:]:  # Skip header row
             team_name = row[0]
@@ -409,6 +637,14 @@ def simulate_season(base_table, fixtures, home_table=None, away_table=None):
                 "GA": int(row[6]),     # Goals Against
                 "PTS": int(row[7])     # Points
             }
+            
+            # Calcular λ_home
+            matches = int(row[1])
+            goals_for = int(row[5])
+            if matches > 0:
+                team_lambdas['home'][team_name] = goals_for / matches
+            else:
+                team_lambdas['home'][team_name] = 1.0
     
     if away_table:
         for row in away_table[1:]:  # Skip header row
@@ -422,6 +658,19 @@ def simulate_season(base_table, fixtures, home_table=None, away_table=None):
                 "GA": int(row[6]),     # Goals Against
                 "PTS": int(row[7])     # Points
             }
+            
+            # Calcular λ_away
+            matches = int(row[1])
+            goals_for = int(row[5])
+            if matches > 0:
+                team_lambdas['away'][team_name] = goals_for / matches
+            else:
+                team_lambdas['away'][team_name] = 1.0
+                
+    # Estimar parámetro rho de Dixon-Coles
+    # Como no tenemos acceso a los datos históricos completos, usamos un valor típico
+    # En caso real, habría que obtener datos de partidos anteriores
+    rho = -0.1  # Valor típico para fútbol (correlación negativa entre goles)
     
     # Check if any team has reached the maximum number of matches
     max_matches = (len(standings) - 1) * 2  # Each team plays against every other team twice
@@ -448,114 +697,13 @@ def simulate_season(base_table, fixtures, home_table=None, away_table=None):
     else:
         completed_ranks = {}
     
-    # Identify teams with remaining fixtures to simulate
-    teams_in_fixtures = set()
-    for match in fixtures:
-        teams_in_fixtures.add(match["h"]["title"])
-        teams_in_fixtures.add(match["a"]["title"])
-    
-    # Calculate team strength values based on comprehensive statistics
-    team_strengths = {}
-    for team, data in standings.items():
-        if data["M"] > 0:  # Avoid division by zero
-            matches = data["M"]
-            points = data["PTS"]
-            goals_for = data["GF"]
-            goals_against = data["GA"]
-            
-            # Calculate per-match metrics
-            points_per_match = points / matches
-            goals_for_per_match = goals_for / matches
-            goals_against_per_match = goals_against / matches
-            
-            # Offensive efficiency factor (rewards scoring many goals)
-            offensive_factor = goals_for_per_match * 1.2
-            
-            # Defensive efficiency factor (rewards conceding few goals)
-            # We use the inverse so a lower goals against gives a higher value
-            defensive_factor = 1.5 / (goals_against_per_match + 0.5)  # The +0.5 prevents division by very small numbers
-            
-            # Overall performance factor (based on points)
-            performance_factor = points_per_match * 0.8
-            
-            # Combine all factors for the final team strength calculation
-            team_strengths[team] = {
-                "overall": offensive_factor + defensive_factor + performance_factor,
-                "attack": offensive_factor,
-                "defense": defensive_factor,
-                "form": performance_factor,
-                "ppg": points_per_match,
-                "gf_per_match": goals_for_per_match,
-                "ga_per_match": goals_against_per_match,
-                "gd_per_match": goals_for_per_match - goals_against_per_match,
-                # Add specific home and away statistics
-                "home_attack": None,
-                "home_defense": None,
-                "away_attack": None,
-                "away_defense": None
-            }
-        else:
-            # Default values for teams without matches played
-            team_strengths[team] = {
-                "overall": 2.0,
-                "attack": 1.0,
-                "defense": 1.0,
-                "form": 1.0,
-                "ppg": 1.0,
-                "gf_per_match": 1.0,
-                "ga_per_match": 1.0,
-                "gd_per_match": 0.0,
-                "home_attack": None,
-                "home_defense": None,
-                "away_attack": None,
-                "away_defense": None
-            }
-    
-    # Add specific home and away factors if available
-    for team in team_strengths:
-        # Home statistics
-        if team in home_stats and home_stats[team]["M"] > 0:
-            home_matches = home_stats[team]["M"]
-            home_gf = home_stats[team]["GF"]
-            home_ga = home_stats[team]["GA"]
-            home_pts = home_stats[team]["PTS"]
-            
-            # Home offensive factor
-            home_gf_per_match = home_gf / home_matches
-            team_strengths[team]["home_attack"] = home_gf_per_match * 1.2
-            
-            # Home defensive factor
-            home_ga_per_match = home_ga / home_matches
-            team_strengths[team]["home_defense"] = 1.5 / (home_ga_per_match + 0.5)
-            
-        # Away statistics
-        if team in away_stats and away_stats[team]["M"] > 0:
-            away_matches = away_stats[team]["M"]
-            away_gf = away_stats[team]["GF"]
-            away_ga = away_stats[team]["GA"]
-            away_pts = away_stats[team]["PTS"]
-            
-            # Away offensive factor
-            away_gf_per_match = away_gf / away_matches
-            team_strengths[team]["away_attack"] = away_gf_per_match * 1.2
-            
-            # Away defensive factor
-            away_ga_per_match = away_ga / away_matches
-            team_strengths[team]["away_defense"] = 1.5 / (away_ga_per_match + 0.5)
-    
-    # Normalize strengths to a reasonable range
-    max_overall = max(strength["overall"] for strength in team_strengths.values())
-    for team in team_strengths:
-        # Normalize to a range between 0.5 and 2.0
-        team_strengths[team]["overall"] = 0.5 + (team_strengths[team]["overall"] / max_overall) * 1.5
-    
     # Create a copy of current standings for simulation
     simulation_standings = {
         team: data.copy() for team, data in standings.items()
         if team not in completed_teams
     }
     
-    # Simulate remaining matches
+    # Simulate remaining matches with Dixon-Coles model
     for match in fixtures:
         h_team = match["h"]["title"]
         a_team = match["a"]["title"]
@@ -564,41 +712,48 @@ def simulate_season(base_table, fixtures, home_table=None, away_table=None):
         if h_team in completed_teams or a_team in completed_teams:
             continue
         
-        # Get statistics for both teams
-        home_team_stats = team_strengths.get(h_team, {"overall": 1.5, "attack": 1.2, "defense": 1.0, 
-                                                     "home_attack": None, "home_defense": None})
-        away_team_stats = team_strengths.get(a_team, {"overall": 1.5, "attack": 1.2, "defense": 1.0,
-                                                     "away_attack": None, "away_defense": None})
+        # Calcular λ_home y λ_away para los equipos
+        # Combinamos λ_home y λ_global para equipos locales (70% home, 30% global)
+        # Combinamos λ_away y λ_global para equipos visitantes (70% away, 30% global)
+        lambda_h = 0.0
+        lambda_a = 0.0
         
-        # Use specific home/away statistics if available
-        # Otherwise, use overall statistics
-        home_attack = home_team_stats["home_attack"] if home_team_stats["home_attack"] is not None else home_team_stats["attack"]
-        home_defense = home_team_stats["home_defense"] if home_team_stats["home_defense"] is not None else home_team_stats["defense"]
-        away_attack = away_team_stats["away_attack"] if away_team_stats["away_attack"] is not None else away_team_stats["attack"]
-        away_defense = away_team_stats["away_defense"] if away_team_stats["away_defense"] is not None else away_team_stats["defense"]
+        # Calcular lambda_h (equipo local)
+        if h_team in team_lambdas['home'] and h_team in team_lambdas['global']:
+            lambda_h = 0.7 * team_lambdas['home'][h_team] + 0.3 * team_lambdas['global'][h_team]
+            # Aplicar factor de ventaja local
+            lambda_h *= HOME_ADVANTAGE
+        elif h_team in team_lambdas['home']:
+            lambda_h = team_lambdas['home'][h_team] * HOME_ADVANTAGE
+        elif h_team in team_lambdas['global']:
+            lambda_h = team_lambdas['global'][h_team] * HOME_ADVANTAGE
+        else:
+            # Si no hay datos, usar un valor por defecto
+            lambda_h = 1.3  # Valor por defecto para equipos locales
+            
+        # Calcular lambda_a (equipo visitante)
+        if a_team in team_lambdas['away'] and a_team in team_lambdas['global']:
+            lambda_a = 0.7 * team_lambdas['away'][a_team] + 0.3 * team_lambdas['global'][a_team]
+        elif a_team in team_lambdas['away']:
+            lambda_a = team_lambdas['away'][a_team]
+        elif a_team in team_lambdas['global']:
+            lambda_a = team_lambdas['global'][a_team]
+        else:
+            # Si no hay datos, usar un valor por defecto
+            lambda_a = 1.0  # Valor por defecto para equipos visitantes
+            
+        # Añadir factor de forma aleatorio (±10%)
+        home_form = 1.0 + random.uniform(-0.1, 0.1)
+        away_form = 1.0 + random.uniform(-0.1, 0.1)
+        lambda_h *= home_form
+        lambda_a *= away_form
         
-        # Calculate xG based on each team's offensive strength against opponent's defense
-        home_attack_vs_away_defense = home_attack / (away_defense * 0.8)
-        away_attack_vs_home_defense = away_attack / (home_defense * 1.0)
+        # Asegurarnos de que los valores no sean negativos o muy pequeños
+        lambda_h = max(0.3, lambda_h)
+        lambda_a = max(0.3, lambda_a)
         
-        # Apply home advantage and form factors
-        home_form_factor = 1.0 + random.uniform(-0.1, 0.1)  # Random form variation
-        away_form_factor = 1.0 + random.uniform(-0.1, 0.1)
-        
-        # Calculate final xG with all factors
-        xg_h = max(0.3, home_attack_vs_away_defense * HOME_ADVANTAGE * home_form_factor)
-        xg_a = max(0.3, away_attack_vs_home_defense * away_form_factor)
-        
-        # Adjust for balanced matches (when teams have similar statistics)
-        if abs(home_team_stats["overall"] - away_team_stats["overall"]) < 0.2:
-            # In balanced matches, increase the probability of a draw
-            if random.random() < 0.15:  # 15% chance of a "tactical draw"
-                adjustment = random.uniform(0.7, 0.9)
-                xg_h *= adjustment
-                xg_a *= adjustment
-        
-        # Simulate the match
-        gh, ga = simulate_match(xg_h, xg_a)
+        # Simular el partido usando modelo Dixon-Coles
+        gh, ga = dixon_coles_simulate_match(lambda_h, lambda_a, rho)
         
         for team in [h_team, a_team]:
             if team not in simulation_standings:
@@ -1269,5 +1424,113 @@ def main():
     # Make sure we call the visualization function with the actual number of simulations
     visualize_results(position_counts, simulations_completed, team_colors, base_table)
 
+# Dixon-Coles model functions - NEWLY ADDED
+def dixon_coles_tau(x, y, lambda_x, lambda_y, rho):
+    """
+    Función de corrección Dixon-Coles para partidos de fútbol.
+    Corrige las probabilidades de Poisson en los resultados de pocos goles (0-0, 1-0, 0-1, 1-1).
+    
+    Args:
+        x: Goles del equipo local
+        y: Goles del equipo visitante
+        lambda_x: Tasa esperada de goles del equipo local (λ_home)
+        lambda_y: Tasa esperada de goles del equipo visitante (λ_away)
+        rho: Parámetro de corrección (correlación entre resultados locales y visitantes)
+        
+    Returns:
+        Factor de corrección τ
+    """
+    if x == 0 and y == 0:
+        return 1 - lambda_x * lambda_y * rho
+    elif x == 0 and y == 1:
+        return 1 + lambda_x * rho
+    elif x == 1 and y == 0:
+        return 1 + lambda_y * rho
+    elif x == 1 and y == 1:
+        return 1 - rho
+    else:
+        return 1.0  # Sin corrección para otros resultados
+
+def dixon_coles_probability(x, y, lambda_x, lambda_y, rho):
+    """
+    Calcula la probabilidad de un resultado específico usando el modelo Dixon-Coles.
+    P(goles_local=x, goles_visitante=y) = Poisson(x;λ_x) * Poisson(y;λ_y) * τ(x,y,ρ)
+    
+    Args:
+        x: Goles del equipo local
+        y: Goles del equipo visitante
+        lambda_x: Tasa esperada de goles del equipo local (λ_home)
+        lambda_y: Tasa esperada de goles del equipo visitante (λ_away)
+        rho: Parámetro de corrección (correlación entre resultados locales y visitantes)
+        
+    Returns:
+        Probabilidad del resultado específico
+    """
+    # Probabilidad Poisson independiente para cada equipo
+    p_x = np.exp(-lambda_x) * (lambda_x ** x) / math.factorial(x)
+    p_y = np.exp(-lambda_y) * (lambda_y ** y) / math.factorial(y)
+    
+    # Aplicar corrección τ
+    tau = dixon_coles_tau(x, y, lambda_x, lambda_y, rho)
+    
+    return p_x * p_y * tau
+
+def estimate_rho_from_matches(matches_data, home_lambdas, away_lambdas):
+    """
+    Estima el parámetro ρ del modelo Dixon-Coles por máxima verosimilitud.
+    
+    Args:
+        matches_data: Lista de tuplas (equipo_local, equipo_visitante, goles_local, goles_visitante)
+        home_lambdas: Diccionario de λ_home por equipo
+        away_lambdas: Diccionario de λ_away por equipo
+        
+    Returns:
+        Valor óptimo de ρ
+    """
+    def neg_log_likelihood(rho):
+        """
+        Función de log-verosimilitud negativa a minimizar.
+        """
+        nll = 0
+        for h_team, a_team, h_goals, a_goals in matches_data:
+            if h_team in home_lambdas and a_team in away_lambdas:
+                lambda_h = home_lambdas[h_team]
+                lambda_a = away_lambdas[a_team]
+                
+                # Si alguno de los lambdas es cero, usamos un valor pequeño para evitar errores
+                if lambda_h <= 0:
+                    lambda_h = 0.1
+                if lambda_a <= 0:
+                    lambda_a = 0.1
+                    
+                # La probabilidad logarítmica negativa (menos es mejor)
+                p = dixon_coles_probability(h_goals, a_goals, lambda_h, lambda_a, rho)
+                if p > 0:
+                    nll -= np.log(p)
+                else:
+                    # Penalizar fuertemente probabilidades muy cercanas a cero
+                    nll += 100
+            else:
+                # Penalización para equipos sin datos
+                nll += 50
+        return nll
+    
+    # Restringimos ρ al rango [-0.2, 0.2] que es típico para fútbol
+    result = optimize.minimize_scalar(neg_log_likelihood, bounds=(-0.2, 0.2), method='bounded')
+    
+    if result.success:
+        return result.x
+    else:
+        # Si la optimización falla, retornamos un valor por defecto
+        print("⚠️ La estimación de ρ falló. Usando valor por defecto.")
+        return -0.1  # Valor típico negativo que refleja la correlación negativa entre goles
+
 if __name__ == "__main__":
-    main()
+    # Initialize global driver at the start
+    initialize_global_driver()
+    
+    try:
+        main()
+    finally:
+        # Ensure the global driver is closed when the program ends
+        cleanup_global_driver()
