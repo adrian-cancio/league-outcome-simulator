@@ -561,6 +561,38 @@ def simulate_match(xg_home, xg_away):
     
     return home_goals, away_goals
 
+def dixon_coles_probability(x, y, lambda_x, lambda_y, rho):
+    """
+    Calculate the probability of a specific match result using the Dixon-Coles model.
+    
+    Args:
+        x: Home team goals.
+        y: Away team goals.
+        lambda_x: Expected goals for the home team.
+        lambda_y: Expected goals for the away team.
+        rho: Correlation parameter.
+        
+    Returns:
+        Probability of the result (x, y).
+    """
+    # Calculate independent Poisson probabilities
+    p_x = np.exp(-lambda_x) * (lambda_x ** x) / math.factorial(x)
+    p_y = np.exp(-lambda_y) * (lambda_y ** y) / math.factorial(y)
+    
+    # Apply Dixon-Coles adjustment for low-scoring matches
+    tau = 1.0  # Default adjustment factor
+    if x == 0 and y == 0:
+        tau = 1 - lambda_x * lambda_y * rho
+    elif x == 0 and y == 1:
+        tau = 1 + lambda_x * rho
+    elif x == 1 and y == 0:
+        tau = 1 + lambda_y * rho
+    elif x == 1 and y == 1:
+        tau = 1 - rho
+        
+    # Combine Poisson probabilities with the adjustment factor
+    return p_x * p_y * tau
+
 def dixon_coles_simulate_match(lambda_home, lambda_away, rho):
     """
     Simula un partido usando el modelo Dixon-Coles en lugar de Poisson independientes.
