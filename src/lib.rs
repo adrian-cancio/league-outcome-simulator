@@ -391,7 +391,7 @@ fn simulate_bulk(py: Python, base_table: PyObject, fixtures: PyObject, n_sims: u
 }
 
 #[pymodule]
-fn rust_sim(_py: Python, m: &PyModule) -> PyResult<()> {
+fn league_outcome_simulator_rust(_py: Python, m: &PyModule) -> PyResult<()> {
     // Configure Rayon to use all CPU cores available
     ThreadPoolBuilder::new()
         .num_threads(num_cpus::get())

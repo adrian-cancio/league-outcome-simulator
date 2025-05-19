@@ -81,6 +81,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "league_outcome_simulator_rust"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+ "num_cpus",
+ "pyo3",
+ "rand",
+ "rand_chacha",
+ "rand_distr",
+ "rayon",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.172"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -314,19 +327,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "928fca9cf2aa042393a8325b9ead81d2f0df4cb12e1e24cef072922ccd99c5af"
 dependencies = [
  "bitflags",
-]
-
-[[package]]
-name = "rust_sim"
-version = "0.1.0"
-dependencies = [
- "lazy_static",
- "num_cpus",
- "pyo3",
- "rand",
- "rand_chacha",
- "rand_distr",
- "rayon",
 ]
 
 [[package]]

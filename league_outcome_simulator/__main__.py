@@ -1,4 +1,4 @@
-"""Entry point for `python -m football_probs`"""
+"""Entry point for `python -m league_outcome_simulator`"""
 from .cli import main
 
 if __name__ == "__main__":

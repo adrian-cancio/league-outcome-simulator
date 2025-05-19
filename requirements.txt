@@ -1,0 +1,11 @@
+selenium
+
+tqdm
+
+pandas
+
+matplotlib
+
+numpy
+
+scipy

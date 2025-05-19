@@ -2,10 +2,9 @@
 Football season simulation module - delegates all simulation to Rust implementation.
 """
 try:
-    from rust_sim import simulate_season as rust_simulate_season
+    from league_outcome_simulator_rust import simulate_season as rust_simulate_season  # type: ignore  # updated to new Rust crate name
 except ImportError:
-    print("❌ Rust simulation library could not be loaded!")
-    print("   Please make sure the Rust library is compiled with 'cargo build --release'")
+    print("❌ Rust simulation library could not be loaded! Please compile the Rust extension module.")
     raise ImportError("Rust simulation module is required but could not be imported")
 
 def simulate_season(base_table, fixtures, home_table=None, away_table=None):

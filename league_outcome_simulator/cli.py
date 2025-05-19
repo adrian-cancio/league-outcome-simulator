@@ -11,6 +11,18 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from tqdm import tqdm
+import sys
+import importlib.util
+
+# dependency check at startup
+required_packages = [
+    "selenium", "tqdm", "pandas", "matplotlib", "numpy", "scipy"
+]
+missing = [pkg for pkg in required_packages if importlib.util.find_spec(pkg) is None]
+if missing:
+    print(f"❌ Missing dependencies: {', '.join(missing)}")
+    print("Please install them with: pip install -r requirements.txt")
+    sys.exit(1)
 
 # Use package-relative imports
 from .data import SofaScoreClient

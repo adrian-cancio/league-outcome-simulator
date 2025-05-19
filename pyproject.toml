@@ -3,10 +3,10 @@ requires = ["maturin>=1.0"]
 build-backend = "maturin"
 
 [project]
-name = "rust_sim"
+name = "league-outcome-simulator"
 version = "0.1.0"
-description = "Rust-accelerated simulation for football-probs"
-authors = [{name = "Football Probs Team"}]
+description = "Rust-accelerated simulation for League Outcome Simulator"
+authors = [{name = "adrian-cancio"}]
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.7"

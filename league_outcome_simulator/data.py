@@ -10,6 +10,8 @@ class SofaScoreClient:
     BASE_URL = "https://api.sofascore.com/api/v1"
 
     def __init__(self, global_driver=None):
+        # Cache for JSON responses to prevent duplicate requests
+        self.json_cache = {}
         """Initialize SofaScore client with optional global driver reference."""
         self.driver = global_driver
         if not self.driver:
@@ -41,12 +43,20 @@ class SofaScoreClient:
             print("❌ Driver not initialized")
             return None
             
+        # Check if we have cached data for this URL
+        if url in self.json_cache:
+            print(f"🔄 Using cached data for: {url}")
+            return self.json_cache[url]
+        
         print(f"🔄 Getting data from: {url}")
         try:
             self.driver.get(url)
             time.sleep(2)
             body = self.driver.find_element("tag name", "body").text
-            return json.loads(body)
+            # Parse and cache the JSON response
+            json_data = json.loads(body)
+            self.json_cache[url] = json_data
+            return json_data
         except Exception as e:
             print(f"❌ Error fetching data: {e}")
             return None
