@@ -88,7 +88,7 @@ LEAGUES = {
 CURRENT_YEAR = datetime.now().year
 
 MAX_SIMULATIONS = 1_000_000  # Maximum number of simulations
-MAX_SIMULATION_TIME_SECONDS = 60  # Maximum simulation time in seconds
+MAX_SIMULATION_TIME_SECONDS = 600  # Maximum simulation time in seconds
 HOME_ADVANTAGE = 1.25  # Home advantage factor (1.0 = neutral, higher = more advantage)
 
 # Color utility functions - MOVED HERE FROM THE BOTTOM OF THE FILE
@@ -1086,17 +1086,18 @@ def main():
     print("🔄 Fetching team colors for visualization...")
     team_colors = get_team_colors_from_standings(tournament_id, season_id)
     # Close the Selenium driver now that all API data is fetched
+    print("🔄 Closing SofaScore driver...")
     cleanup_global_driver()
-
-    print("🔄 Simulating seasons...")
-    results = simulate_season(base_table, fixtures, home_table, away_table)
-    print("📈 Simulation complete. Results:")
-    for pos, (team, stats) in enumerate(results, 1):
-        print(f"{pos}. {team} - {stats['PTS']} pts")
+    
 
     # Adjust position_counts to reflect multiple simulations
     position_counts = {team: Counter() for team in [row[0] for row in base_table[1:]]}
     start_time = time.time()
+
+    # If no fixtures, exit early
+    if not fixtures:
+        print("❌ No fixtures to simulate.")
+        return
 
     for _ in tqdm(range(MAX_SIMULATIONS), desc="Simulating seasons", unit="simulation"):
         if time.time() - start_time > MAX_SIMULATION_TIME_SECONDS:

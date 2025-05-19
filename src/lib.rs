@@ -4,8 +4,14 @@ use std::collections::HashMap;
 use rand::thread_rng;
 use rand_distr::{Poisson, Distribution};
 use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
+use num_cpus;
 use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+use pyo3::exceptions::PyValueError;
+
+const HOME_ADVANTAGE: f64 = 1.25;
+const DEFAULT_LAMBDA: f64 = 1.0;
 
 #[pyfunction]
 fn simulate_season(py: Python, base_table: PyObject, fixtures: PyObject) -> PyResult<PyObject> {
@@ -32,46 +38,75 @@ fn simulate_season(py: Python, base_table: PyObject, fixtures: PyObject) -> PyRe
     // Simulate each fixture
     for match_obj in fixtures_list.iter() {
         let dict: &PyDict = match_obj.extract()?;
-        let h: &PyDict = dict.get_item("h").unwrap().downcast()?;
-        let a: &PyDict = dict.get_item("a").unwrap().downcast()?;
-        let h_team: String = h.get_item("title").unwrap().extract()?;
-        let a_team: String = a.get_item("title").unwrap().extract()?;
+        // Safely get home and away dicts
+        let h_any = dict.get_item("h").ok_or_else(|| PyValueError::new_err("Fixture missing 'h' key"))?;
+        let h: &PyDict = h_any.downcast().map_err(|_| PyValueError::new_err("Fixture 'h' is not a dict"))?;
+        let a_any = dict.get_item("a").ok_or_else(|| PyValueError::new_err("Fixture missing 'a' key"))?;
+        let a: &PyDict = a_any.downcast().map_err(|_| PyValueError::new_err("Fixture 'a' is not a dict"))?;
+        
+        // Safely get team titles
+        let h_team = h.get_item("title").ok_or_else(|| PyValueError::new_err("Missing 'title' in home object"))?.extract()?;
+        let a_team = a.get_item("title").ok_or_else(|| PyValueError::new_err("Missing 'title' in away object"))?.extract()?;
 
         // Compute lambdas
-        let sh = standings.get(&h_team).unwrap();
-        let sa = standings.get(&a_team).unwrap();
-        let lambda_h = (sh.gf as f64 / sh.m as f64) * 1.25;
-        let lambda_a = sa.gf as f64 / sa.m as f64;
+        let sh = standings.get(&h_team)
+            .ok_or_else(|| PyValueError::new_err(format!("Team '{}' not found in standings", h_team)))?;
+        let sa = standings.get(&a_team)
+            .ok_or_else(|| PyValueError::new_err(format!("Team '{}' not found in standings", a_team)))?;
+        let lambda_h = if sh.m > 0 {
+            (sh.gf as f64 / sh.m as f64) * HOME_ADVANTAGE
+        } else {
+            HOME_ADVANTAGE
+        };
+        let lambda_a = if sa.m > 0 {
+            sa.gf as f64 / sa.m as f64
+        } else {
+            DEFAULT_LAMBDA
+        };
 
-        // Sample goals
-        let gh = Poisson::new(lambda_h).unwrap().sample(&mut rng) as i64;
-        let ga = Poisson::new(lambda_a).unwrap().sample(&mut rng) as i64;
+        // Sample goals, default to 0 if lambda is non-positive
+        let gh = if lambda_h > 0.0 {
+            Poisson::new(lambda_h).unwrap().sample(&mut rng) as i64
+        } else {
+            0
+        };
+        let ga = if lambda_a > 0.0 {
+            Poisson::new(lambda_a).unwrap().sample(&mut rng) as i64
+        } else {
+            0
+        };
 
         // Update standings
         {
-            let sh = standings.get_mut(&h_team).unwrap();
-            sh.gf += gh;
-            sh.ga += ga;
-            sh.m += 1;
+            let sh = standings.get_mut(&h_team)
+                .ok_or_else(|| PyValueError::new_err(format!("Team '{}' not found for update", h_team)))?;
+             sh.gf += gh;
+             sh.ga += ga;
+             sh.m += 1;
         }
         {
-            let sa = standings.get_mut(&a_team).unwrap();
-            sa.gf += ga;
-            sa.ga += gh;
-            sa.m += 1;
+            let sa = standings.get_mut(&a_team)
+                .ok_or_else(|| PyValueError::new_err(format!("Team '{}' not found for update", a_team)))?;
+             sa.gf += ga;
+             sa.ga += gh;
+             sa.m += 1;
         }
-        if gh > ga {
-            let sh = standings.get_mut(&h_team).unwrap();
-            sh.pts += 3;
-        } else if ga > gh {
-            let sa = standings.get_mut(&a_team).unwrap();
-            sa.pts += 3;
-        } else {
-            let sh = standings.get_mut(&h_team).unwrap();
-            sh.pts += 1;
-            let sa = standings.get_mut(&a_team).unwrap();
-            sa.pts += 1;
-        }
+         if gh > ga {
+            let sh = standings.get_mut(&h_team)
+                .ok_or_else(|| PyValueError::new_err(format!("Team '{}' not found for pts update", h_team)))?;
+             sh.pts += 3;
+         } else if ga > gh {
+            let sa = standings.get_mut(&a_team)
+                .ok_or_else(|| PyValueError::new_err(format!("Team '{}' not found for pts update", a_team)))?;
+             sa.pts += 3;
+         } else {
+            let sh = standings.get_mut(&h_team)
+                .ok_or_else(|| PyValueError::new_err(format!("Team '{}' not found for pts update", h_team)))?;
+             sh.pts += 1;
+            let sa = standings.get_mut(&a_team)
+                .ok_or_else(|| PyValueError::new_err(format!("Team '{}' not found for pts update", a_team)))?;
+             sa.pts += 1;
+         }
     }
 
     // Sort standings
@@ -181,6 +216,12 @@ fn simulate_bulk(py: Python, base_table: PyObject, fixtures: PyObject, n_sims: u
 
 #[pymodule]
 fn rust_sim(_py: Python, m: &PyModule) -> PyResult<()> {
+    // Configure Rayon to use all CPU cores available
+    ThreadPoolBuilder::new()
+        .num_threads(num_cpus::get())
+        .build_global()
+        .expect("Failed to build global thread pool");
+
     m.add_function(wrap_pyfunction!(simulate_season, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_bulk, m)?)?;
     Ok(())
