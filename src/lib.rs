@@ -16,101 +16,142 @@ use std::sync::Mutex;
 #[macro_use]
 extern crate lazy_static;
 
+// Simulation constants
 const HOME_ADVANTAGE: f64 = 1.25;
 const DEFAULT_LAMBDA: f64 = 1.0;
 const DEFAULT_RHO: f64 = -0.1;  // Dixon-Coles correlation parameter
-
-// Dixon-Coles correction factor (tau)
-fn dixon_coles_tau(x: i64, y: i64, lambda_x: f64, lambda_y: f64, rho: f64) -> f64 {
-    if x == 0 && y == 0 {
-        1.0 - lambda_x * lambda_y * rho
-    } else if x == 0 && y == 1 {
-        1.0 + lambda_x * rho
-    } else if x == 1 && y == 0 {
-        1.0 + lambda_y * rho
-    } else if x == 1 && y == 1 {
-        1.0 - rho
-    } else {
-        1.0
-    }
-}
-
-// Calculate Poisson probability mass function
-fn poisson_pmf(k: i64, lambda: f64) -> f64 {
-    if lambda <= 0.0 || k < 0 {
-        return 0.0;
-    }
-    let k_float = k as f64;
-    let log_lambda = lambda.ln();
-    let log_k_factorial = (1..=k).map(|i| (i as f64).ln()).sum::<f64>();
-    (-lambda + k_float * log_lambda - log_k_factorial).exp()
-}
-
-// Dixon-Coles probability for a result (x, y)
-fn dixon_coles_probability(x: i64, y: i64, lambda_x: f64, lambda_y: f64, rho: f64) -> f64 {
-    let p_x = poisson_pmf(x, lambda_x);
-    let p_y = poisson_pmf(y, lambda_y);
-    let tau = dixon_coles_tau(x, y, lambda_x, lambda_y, rho);
-    p_x * p_y * tau
-}
 
 // Global cache for precomputed probability matrices
 lazy_static! {
     static ref PROBABILITY_CACHE: Mutex<HashMap<(u64, u64, u64), Vec<Vec<f64>>>> = Mutex::new(HashMap::new());
 }
 
-// Precompute probability matrix for given parameters
-fn precompute_probability_matrix(lambda_h: f64, lambda_a: f64, rho: f64, max_goals: usize) -> Vec<Vec<f64>> {
-    let mut prob_matrix = vec![vec![0.0; max_goals + 1]; max_goals + 1];
-    let mut total_prob = 0.0;
+/// DixonColes - A module for football match simulation using the Dixon-Coles model
+struct DixonColes {}
 
-    for h in 0..=max_goals {
-        for a in 0..=max_goals {
-            let prob = dixon_coles_probability(h as i64, a as i64, lambda_h, lambda_a, rho);
-            prob_matrix[h][a] = prob;
-            total_prob += prob;
+impl DixonColes {
+    // Dixon-Coles correction factor (tau)
+    fn correction_factor(x: i64, y: i64, lambda_x: f64, lambda_y: f64, rho: f64) -> f64 {
+        if x == 0 && y == 0 {
+            1.0 - lambda_x * lambda_y * rho
+        } else if x == 0 && y == 1 {
+            1.0 + lambda_x * rho
+        } else if x == 1 && y == 0 {
+            1.0 + lambda_y * rho
+        } else if x == 1 && y == 1 {
+            1.0 - rho
+        } else {
+            1.0
         }
     }
 
-    // Normalize probabilities
-    for h in 0..=max_goals {
-        for a in 0..=max_goals {
-            prob_matrix[h][a] /= total_prob;
+    // Calculate Poisson probability mass function
+    fn poisson_pmf(k: i64, lambda: f64) -> f64 {
+        if lambda <= 0.0 || k < 0 {
+            return 0.0;
+        }
+        let k_float = k as f64;
+        let log_lambda = lambda.ln();
+        let log_k_factorial = (1..=k).map(|i| (i as f64).ln()).sum::<f64>();
+        (-lambda + k_float * log_lambda - log_k_factorial).exp()
+    }
+
+    // Dixon-Coles probability for a result (x, y)
+    fn result_probability(x: i64, y: i64, lambda_x: f64, lambda_y: f64, rho: f64) -> f64 {
+        let p_x = Self::poisson_pmf(x, lambda_x);
+        let p_y = Self::poisson_pmf(y, lambda_y);
+        let tau = Self::correction_factor(x, y, lambda_x, lambda_y, rho);
+        p_x * p_y * tau
+    }
+
+    // Precompute probability matrix for given parameters
+    fn precompute_probability_matrix(lambda_h: f64, lambda_a: f64, rho: f64, max_goals: usize) -> Vec<Vec<f64>> {
+        let mut prob_matrix = vec![vec![0.0; max_goals + 1]; max_goals + 1];
+        let mut total_prob = 0.0;
+
+        for h in 0..=max_goals {
+            for a in 0..=max_goals {
+                let prob = Self::result_probability(h as i64, a as i64, lambda_h, lambda_a, rho);
+                prob_matrix[h][a] = prob;
+                total_prob += prob;
+            }
+        }
+
+        // Normalize probabilities
+        for h in 0..=max_goals {
+            for a in 0..=max_goals {
+                prob_matrix[h][a] /= total_prob;
+            }
+        }
+
+        prob_matrix
+    }
+
+    // Get or compute probability matrix (cached)
+    fn get_probability_matrix(lambda_h: f64, lambda_a: f64, rho: f64, max_goals: usize) -> Vec<Vec<f64>> {
+        // use to_bits to get u64 for hashing
+        let key = (lambda_h.to_bits(), lambda_a.to_bits(), rho.to_bits());
+        let mut cache = PROBABILITY_CACHE.lock().unwrap();
+
+        if let Some(matrix) = cache.get(&key) {
+            return matrix.clone();
+        }
+
+        let matrix = Self::precompute_probability_matrix(lambda_h, lambda_a, rho, max_goals);
+        cache.insert(key, matrix.clone());
+        matrix
+    }
+
+    // Simulate a match using Dixon-Coles model
+    fn simulate_match<R: Rng>(rng: &mut R, lambda_h: f64, lambda_a: f64, rho: f64, max_goals: usize) -> (i64, i64) {
+        let prob_matrix = Self::get_probability_matrix(lambda_h, lambda_a, rho, max_goals);
+
+        // Flatten the matrix and create a weighted distribution
+        let flat_probs: Vec<f64> = prob_matrix.iter().flat_map(|row| row.iter()).cloned().collect();
+        let dist = WeightedIndex::new(&flat_probs).unwrap();
+
+        // Sample from the distribution
+        let idx = dist.sample(rng);
+        let home_goals = (idx / (max_goals + 1)) as i64;
+        let away_goals = (idx % (max_goals + 1)) as i64;
+
+        (home_goals, away_goals)
+    }
+}
+
+/// FootballSimulation - A module for simulating football seasons
+struct FootballSimulation {}
+
+impl FootballSimulation {
+    // Simulate a single match with given parameters
+    fn simulate_match<R: Rng>(rng: &mut R, lambda_h: f64, lambda_a: f64) -> (i64, i64) {
+        // Use Dixon-Coles model when appropriate
+        if lambda_h > 0.0 && lambda_a > 0.0 {
+            DixonColes::simulate_match(rng, lambda_h, lambda_a, DEFAULT_RHO, 10)
+        } else {
+            // Fallback to standard Poisson if lambdas are invalid
+            let gh = if lambda_h > 0.0 { Poisson::new(lambda_h).unwrap().sample(rng) as i64 } else { 0 };
+            let ga = if lambda_a > 0.0 { Poisson::new(lambda_a).unwrap().sample(rng) as i64 } else { 0 };
+            (gh, ga)
         }
     }
-
-    prob_matrix
-}
-
-// Get or compute probability matrix
-fn get_probability_matrix(lambda_h: f64, lambda_a: f64, rho: f64, max_goals: usize) -> Vec<Vec<f64>> {
-    // use to_bits to get u64 for hashing
-    let key = (lambda_h.to_bits(), lambda_a.to_bits(), rho.to_bits());
-    let mut cache = PROBABILITY_CACHE.lock().unwrap();
-
-    if let Some(matrix) = cache.get(&key) {
-        return matrix.clone();
+    
+    // Calculate expected goals based on team stats
+    fn calculate_lambdas(h_stats: &(i64, i64, i64, i64), a_stats: &(i64, i64, i64, i64)) -> (f64, f64) {
+        let lambda_h = if h_stats.3 > 0 {
+            (h_stats.1 as f64 / h_stats.3 as f64) * HOME_ADVANTAGE
+        } else {
+            HOME_ADVANTAGE
+        };
+        
+        let lambda_a = if a_stats.3 > 0 {
+            a_stats.1 as f64 / a_stats.3 as f64
+        } else {
+            DEFAULT_LAMBDA
+        };
+        
+        (lambda_h, lambda_a)
     }
-
-    let matrix = precompute_probability_matrix(lambda_h, lambda_a, rho, max_goals);
-    cache.insert(key, matrix.clone());
-    matrix
-}
-
-// Simulate a match using Dixon-Coles model
-fn simulate_dixon_coles_match<R: Rng>(rng: &mut R, lambda_h: f64, lambda_a: f64, rho: f64, max_goals: usize) -> (i64, i64) {
-    let prob_matrix = get_probability_matrix(lambda_h, lambda_a, rho, max_goals);
-
-    // Flatten the matrix and create a weighted distribution
-    let flat_probs: Vec<f64> = prob_matrix.iter().flat_map(|row| row.iter()).cloned().collect();
-    let dist = WeightedIndex::new(&flat_probs).unwrap();
-
-    // Sample from the distribution
-    let idx = dist.sample(rng);
-    let home_goals = (idx / (max_goals + 1)) as i64;
-    let away_goals = (idx % (max_goals + 1)) as i64;
-
-    (home_goals, away_goals)
 }
 
 #[pyfunction]
@@ -172,15 +213,8 @@ fn simulate_season(py: Python, base_table: PyObject, fixtures: PyObject) -> PyRe
             DEFAULT_LAMBDA
         };
 
-        // Use Dixon-Coles model (with correlation adjustment tau) when both lambdas are positive
-        let (gh, ga) = if lambda_h > 0.0 && lambda_a > 0.0 {
-            simulate_dixon_coles_match(&mut rng, lambda_h, lambda_a, DEFAULT_RHO, 10)
-        } else {
-            // Fallback to standard Poisson if lambdas are invalid
-            let gh = if lambda_h > 0.0 { Poisson::new(lambda_h).unwrap().sample(&mut rng) as i64 } else { 0 };
-            let ga = if lambda_a > 0.0 { Poisson::new(lambda_a).unwrap().sample(&mut rng) as i64 } else { 0 };
-            (gh, ga)
-        };
+        // Simulate match using appropriate method
+        let (gh, ga) = FootballSimulation::simulate_match(&mut rng, lambda_h, lambda_a);
 
         // Update standings - safely handle home team
         if let Some(sh_mut) = standings.get_mut(&h_team) {
@@ -271,18 +305,14 @@ fn simulate_bulk(py: Python, base_table: PyObject, fixtures: PyObject, n_sims: u
                 if let (Some(&(pts_h, gf_h, ga_h, m_h)), Some(&(pts_a, gf_a, ga_a, m_a))) = 
                     (standings.get(h_team), standings.get(a_team)) {
                     
-                    let lambda_h = (gf_h as f64 / m_h as f64) * HOME_ADVANTAGE;
-                    let lambda_a = gf_a as f64 / m_a as f64;
+                    // Calculate lambdas based on team stats
+                    let (lambda_h, lambda_a) = FootballSimulation::calculate_lambdas(
+                        &(pts_h, gf_h, ga_h, m_h), 
+                        &(pts_a, gf_a, ga_a, m_a)
+                    );
                     
-                    // Use Dixon-Coles model when appropriate
-                    let (gh, ga) = if lambda_h > 0.0 && lambda_a > 0.0 {
-                        simulate_dixon_coles_match(rng, lambda_h, lambda_a, DEFAULT_RHO, 10)
-                    } else {
-                        // Fallback to standard Poisson if lambdas are invalid
-                        let gh = if lambda_h > 0.0 { Poisson::new(lambda_h).unwrap().sample(rng) as i64 } else { 0 };
-                        let ga = if lambda_a > 0.0 { Poisson::new(lambda_a).unwrap().sample(rng) as i64 } else { 0 };
-                        (gh, ga)
-                    };
+                    // Simulate the match
+                    let (gh, ga) = FootballSimulation::simulate_match(rng, lambda_h, lambda_a);
                     
                     // Update stats
                     standings.insert(h_team.clone(), (
