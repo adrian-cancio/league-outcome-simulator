@@ -4,7 +4,7 @@ Visualization module for football probability simulations.
 import pandas as pd
 import matplotlib.pyplot as plt
 from collections import Counter
-from utils import (
+from .utils import (
     get_color_luminance, 
     are_colors_similar, 
     darken_color, 

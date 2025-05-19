@@ -64,3 +64,42 @@ print(results)
 ```
 
 Replace `base_table` and `fixtures` with your actual data structures as described in the documentation.
+
+## Project Organization
+
+A suggested folder structure for better organization:
+
+```
+football-probs/
+├── football_probs/         # Python package
+│   ├── __init__.py
+│   ├── __main__.py        # Entry point for `python -m football_probs`
+│   ├── cli.py             # CLI interface module
+│   ├── data.py            # Data fetching client
+│   ├── models.py          # Simulation models
+│   ├── simulation.py      # Rust wrapper
+│   ├── utils.py           # Helper functions
+│   └── visualization.py   # Plotting and text output
+├── src/                    # Rust library source (PyO3 extension)
+├── target/                 # Rust build artifacts
+├── tests/                  # (Optional) unit tests
+├── examples/               # (Optional) example scripts
+├── README.md
+├── pyproject.toml
+└── Cargo.toml
+```
+
+## Running the CLI
+
+Once the extension and package are installed (see Installation and Build), you can run the simulation from the command line:
+
+```bash
+python -m football_probs
+```
+
+Alternatively, after packaging you may install a script entry point via your package manager or add one in `pyproject.toml` under `[project.scripts]`:
+
+```toml
+[project.scripts]
+football-probs = "football_probs.cli:main"
+```

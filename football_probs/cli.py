@@ -12,11 +12,11 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from tqdm import tqdm
 
-# Import modules
-from data import SofaScoreClient
-from simulation import simulate_season
-from visualization import visualize_results, print_simulation_results
-from utils import process_team_colors
+# Use package-relative imports
+from .data import SofaScoreClient
+from .simulation import simulate_season
+from .visualization import visualize_results, print_simulation_results
+from .utils import process_team_colors
 
 # Configuration constants
 MAX_SIMULATIONS = 1_000_000  # Maximum number of simulations
