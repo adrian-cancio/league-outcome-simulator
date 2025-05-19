@@ -155,15 +155,20 @@ impl FootballSimulation {
 }
 
 #[pyfunction]
-fn simulate_season(py: Python, base_table: PyObject, fixtures: PyObject) -> PyResult<PyObject> {
+fn simulate_season(py: Python, base_table: PyObject, fixtures: PyObject, home_table: PyObject, away_table: PyObject) -> PyResult<PyObject> {
     // Parse Python lists
     let base: &PyList = base_table.extract(py)?;
     let fixtures_list: &PyList = fixtures.extract(py)?;
+    let home_list: &PyList = home_table.extract(py)?;
+    let away_list: &PyList = away_table.extract(py)?;
 
     // Team stats struct
     #[derive(Debug, Clone)]
     struct Stats { pts: i64, gf: i64, ga: i64, m: i64 }
     let mut standings: HashMap<String, Stats> = HashMap::new();
+    // Home-only and away-only scoring rates
+    let mut home_stats: HashMap<String, (i64,i64)> = HashMap::new(); // (goals, matches)
+    let mut away_stats: HashMap<String, (i64,i64)> = HashMap::new();
 
     // Initialize standings from base_table (skip header)
     for row in base.iter().skip(1) {
@@ -174,6 +179,22 @@ fn simulate_season(py: Python, base_table: PyObject, fixtures: PyObject) -> PyRe
         let ga: i64 = row_list.get_item(6)?.extract()?;
         let pts: i64 = row_list.get_item(7)?.extract()?;
         standings.insert(team, Stats { pts, gf, ga, m });
+    }
+    // Initialize home_stats from home_list (skip header)
+    for row in home_list.iter().skip(1) {
+        let row_list: &PyList = row.extract()?;
+        let team: String = row_list.get_item(0)?.extract()?;
+        let m: i64 = row_list.get_item(1)?.extract()?;
+        let gf: i64 = row_list.get_item(5)?.extract()?;
+        home_stats.insert(team, (gf, m));
+    }
+    // Initialize away_stats from away_list (skip header)
+    for row in away_list.iter().skip(1) {
+        let row_list: &PyList = row.extract()?;
+        let team: String = row_list.get_item(0)?.extract()?;
+        let m: i64 = row_list.get_item(1)?.extract()?;
+        let gf: i64 = row_list.get_item(5)?.extract()?;
+        away_stats.insert(team, (gf, m));
     }
 
     let mut rng = thread_rng();
@@ -201,17 +222,18 @@ fn simulate_season(py: Python, base_table: PyObject, fixtures: PyObject) -> PyRe
             None => return Err(PyValueError::new_err(format!("Team {} not found in standings", a_team))),
         };
         
-        let lambda_h = if sh.m > 0 {
-            (sh.gf as f64 / sh.m as f64) * HOME_ADVANTAGE
-        } else {
-            HOME_ADVANTAGE
-        };
-        
-        let lambda_a = if sa.m > 0 {
-            sa.gf as f64 / sa.m as f64
-        } else {
-            DEFAULT_LAMBDA
-        };
+        // Compute global scoring rates
+        let global_h = if sh.m > 0 { sh.gf as f64 / sh.m as f64 } else { DEFAULT_LAMBDA };
+        let global_a = if sa.m > 0 { sa.gf as f64 / sa.m as f64 } else { DEFAULT_LAMBDA };
+        // Get venue-specific rates and average with global
+        let home_rate = home_stats.get(&h_team)
+            .map(|&(gf,m)| if m>0 { gf as f64 / m as f64 } else { global_h })
+            .unwrap_or(global_h);
+        let away_rate = away_stats.get(&a_team)
+            .map(|&(gf,m)| if m>0 { gf as f64 / m as f64 } else { global_a })
+            .unwrap_or(global_a);
+        let lambda_h = ((global_h + home_rate) / 2.0) * HOME_ADVANTAGE;
+        let lambda_a = (global_a + away_rate) / 2.0;
 
         // Simulate match using appropriate method
         let (gh, ga) = FootballSimulation::simulate_match(&mut rng, lambda_h, lambda_a);
