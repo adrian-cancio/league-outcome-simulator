@@ -20,3 +20,8 @@ Provide complete, functional code snippets when possible.
 
 ## Tone
 Maintain a professional and helpful tone.
+
+## Project Structure
+It is very important to maintain the project structure.
+If you need to create a new module, package, or file (for example, a "humor" component or similar), create it following folder conventions and place it in the appropriate directory.
+Each part must reside in its designated location to ensure consistency and facilitate maintenance.
