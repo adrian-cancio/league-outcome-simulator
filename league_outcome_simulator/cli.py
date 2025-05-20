@@ -13,6 +13,7 @@ from selenium.webdriver.chrome.service import Service
 from tqdm import tqdm
 import sys
 import importlib.util
+from pathlib import Path
 
 # dependency check at startup
 required_packages = [
@@ -194,11 +195,15 @@ def main():
     # Process team colors for visualization
     processed_colors = process_team_colors(team_colors)
 
+    # Prepare a single results directory for this run organized by league, date and time
+    sanitized_league = league_name.replace(' ', '_')
+    date_str = datetime.now().strftime('%Y-%m-%d')  # YYYY-MM-DD
+    time_str = datetime.now().strftime('%H-%M-%S')  # HH-MM-SS
+    run_dir = Path('results') / sanitized_league / date_str / time_str
     # Print text results
-    print_simulation_results(position_counts, num_simulations, base_table, table_counter)
-    
-    # Show visualization
-    visualize_results(position_counts, num_simulations, processed_colors, base_table)
+    print_simulation_results(position_counts, num_simulations, base_table, table_counter, run_dir)
+    # Show visualization and save image
+    visualize_results(position_counts, num_simulations, processed_colors, base_table, run_dir)
 
 
 if __name__ == "__main__":

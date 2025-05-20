@@ -14,11 +14,14 @@ from .utils import (
     is_good_contrast,
     process_team_colors
 )
+import os
+from datetime import datetime
+from pathlib import Path
 
 # Number of top probable full tables to display and analyze
 NUM_TOP_TABLES = 10
 
-def visualize_results(position_counts, num_simulations, team_colors, base_table):
+def visualize_results(position_counts, num_simulations, team_colors, base_table, run_dir):
     """
     Visualize the simulation results with a stacked bar chart.
     
@@ -421,9 +424,14 @@ def visualize_results(position_counts, num_simulations, team_colors, base_table)
     # Adjust spacing between bars and give more top margin for labels
     plt.subplots_adjust(bottom=0.15, top=0.85, left=0.05, right=0.85)
     plt.tight_layout()    
+    # Ensure output directory exists and save the chart image
+    run_dir.mkdir(parents=True, exist_ok=True)
+    image_file = run_dir / 'probabilities.png'
+    fig.savefig(image_file, dpi=300)
+    print(f"Saved chart to {image_file}")
     plt.show()
 
-def print_simulation_results(position_counts, num_simulations, base_table, table_counter):
+def print_simulation_results(position_counts, num_simulations, base_table, table_counter, run_dir):
     """
     Print the simulation results in a readable format.
     
@@ -432,6 +440,9 @@ def print_simulation_results(position_counts, num_simulations, base_table, table
         num_simulations: Total number of simulations performed
         base_table: Current league standings table
     """
+    # Ensure output directory exists and prepare text file path
+    run_dir.mkdir(parents=True, exist_ok=True)
+    txt_file = run_dir / 'simulation.txt'
     # Calculate current points, matches, and total matches from base_table
     current_points = {}
     current_matches = {}
@@ -443,39 +454,54 @@ def print_simulation_results(position_counts, num_simulations, base_table, table
         current_points[team_name] = int(row[7])  # Points are at index 7
         current_matches[team_name] = int(row[1])  # Matches are at index 1
 
-    # Print final simulation results
-    print("\n📈 Final simulation results:")
-    for team, pos_counter in position_counts.items():
-        total_simulations = sum(pos_counter.values())
-        # Format each probability with three significant digits
-        probabilities = [f"Pos {pos}: {count / total_simulations * 100:.3g}%" for pos, count in sorted(pos_counter.items())]
-        print(f"{team} - {current_points[team]} pts ({current_matches[team]}/{total_matches})\t│ {'  '.join(probabilities)}")
-
-    # Print top probable full final tables
-    print(f"\n📋 Top {NUM_TOP_TABLES} probable full final tables:")
-    if table_counter:
-        for idx, (table, count) in enumerate(table_counter.most_common(NUM_TOP_TABLES), start=1):
-            pct = count / num_simulations * 100
-            # List each team with its finishing position, comma-separated
-            positions_list = [f"{pos}:{team}" for pos, team in enumerate(table, start=1)]
-            teams_line = ', '.join(positions_list)
-            print(f"{idx}. {teams_line} ({pct:.3g}%)")
-    else:
-        print("No full table data available.")
-    # Combine top candidates per position from the top tables
-    top_tables = [table for table, _ in table_counter.most_common(NUM_TOP_TABLES)]
-    if top_tables:
-        print("\n📊 Combined top candidates by position (from top tables):")
-        print("Pos\tCandidates")
-        num_top = len(top_tables)
-        # Number of teams in table
-        n_teams = len(top_tables[0])
-        # For each position, collect candidates
-        for pos in range(n_teams):  # 0-based
-            pos_counter = Counter(table[pos] for table in top_tables)
-            # Format candidates as 'Team (pct%)'
-            candidates = []
-            for team, count in pos_counter.most_common():
-                pct = count / num_top * 100
-                candidates.append(f"{team} ({pct:.3g}%)")
-            print(f"{pos+1}\t{', '.join(candidates)}")
+    # Print and save final simulation results
+    header = "\n📈 Final simulation results:" 
+    print(header)
+    with open(txt_file, 'w', encoding='utf-8') as f:
+        f.write(header + "\n")
+        # Prepare fixed-width prefixes for alignment
+        prefixes = {
+            team: f"{team} - {current_points[team]} pts ({current_matches[team]}/{total_matches})"
+            for team in position_counts
+        }
+        max_prefix_len = max(len(p) for p in prefixes.values())
+         # Team probabilities by position
+        for team, pos_counter in position_counts.items():
+            total = sum(pos_counter.values())
+            probs = [f"Pos {pos}: {count/total*100:.3g}%" for pos, count in sorted(pos_counter.items())]
+            # Align prefix to max width
+            prefix = prefixes[team].ljust(max_prefix_len)
+            line = f"{prefix} │ {'  '.join(probs)}"
+            print(line)
+            f.write(line + "\n")
+        # Top full table predictions
+        top_header = f"\n📋 Top {NUM_TOP_TABLES} probable full final tables:" 
+        print(top_header)
+        f.write(top_header + "\n")
+        if table_counter:
+            for idx, (table, count) in enumerate(table_counter.most_common(NUM_TOP_TABLES), start=1):
+                pct = count / num_simulations * 100
+                teams_line = ', '.join(f"{pos+1}:{team}" for pos, team in enumerate(table))
+                tpl = f"{idx}. {teams_line} ({pct:.3g}%)"
+                print(tpl)
+                f.write(tpl + "\n")
+        else:
+            none_msg = "No full table data available."
+            print(none_msg)
+            f.write(none_msg + "\n")
+        # Combined top candidates by position
+        combined_header = "\n📊 Combined top candidates by position (from top tables):"
+        print(combined_header)
+        f.write(combined_header + "\n")
+        top_tables = [table for table, _ in table_counter.most_common(NUM_TOP_TABLES)]
+        if top_tables:
+            n_top = len(top_tables)
+            num_teams = len(top_tables[0])
+            f.write("Pos\tCandidates\n")
+            for pos in range(num_teams):
+                ctr = Counter(tbl[pos] for tbl in top_tables)
+                cands = ', '.join(f"{team} ({cnt/n_top*100:.3g}%)" for team, cnt in ctr.most_common())
+                row = f"{pos+1}\t{cands}"
+                print(row)
+                f.write(row + "\n")
+    print(f"Saved simulation results to {txt_file}")
