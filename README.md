@@ -15,7 +15,7 @@ Before building and running the simulation, ensure you have the following instal
 **Common requirements**:
 - Python 3.8 or higher
 - Rust toolchain (cargo, rustc) version 1.60 or higher
-- maturin (for building the Python extension)
+- (The Rust extension will compile automatically on first import; no manual build tool needed)
 
 **Windows**:
 - Visual Studio 2019 or later with "Desktop development with C++" workload
@@ -43,11 +43,7 @@ Before building and running the simulation, ensure you have the following instal
    pip install -r requirements.txt
    ```
 
-4. Build and install the Rust extension in development mode:
-   ```bash
-   pip install maturin
-   maturin develop --release
-   ```
+4. Ensure Rust toolchain is installed (cargo, rustc). The Python wrapper will compile the Rust extension on first import—no further manual build steps are required.
 
 ## Usage
 
