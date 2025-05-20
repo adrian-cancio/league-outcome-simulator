@@ -162,6 +162,8 @@ def main():
 
     # Initialize counters for each team's final positions
     position_counts = {team: Counter() for team in [row[0] for row in base_table[1:]]}
+    # Track full final table occurrences
+    table_counter = Counter()
     start_time = time.time()
 
     # Check if there are fixtures to simulate
@@ -179,7 +181,8 @@ def main():
 
         # Simulate the remainder of the season using Rust implementation
         simulated_results = simulate_season(base_table, fixtures, home_table, away_table)
-        
+        # Record the table ordering
+        table_counter[tuple(team for team, _ in simulated_results)] += 1
         # Record the positions from this simulation
         for pos, (team, _) in enumerate(simulated_results, 1):
             position_counts[team][pos] += 1
@@ -192,7 +195,7 @@ def main():
     processed_colors = process_team_colors(team_colors)
 
     # Print text results
-    print_simulation_results(position_counts, num_simulations, base_table)
+    print_simulation_results(position_counts, num_simulations, base_table, table_counter)
     
     # Show visualization
     visualize_results(position_counts, num_simulations, processed_colors, base_table)

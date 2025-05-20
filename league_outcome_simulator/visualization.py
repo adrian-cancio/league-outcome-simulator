@@ -15,6 +15,9 @@ from .utils import (
     process_team_colors
 )
 
+# Number of top probable full tables to display and analyze
+NUM_TOP_TABLES = 10
+
 def visualize_results(position_counts, num_simulations, team_colors, base_table):
     """
     Visualize the simulation results with a stacked bar chart.
@@ -420,7 +423,7 @@ def visualize_results(position_counts, num_simulations, team_colors, base_table)
     plt.tight_layout()    
     plt.show()
 
-def print_simulation_results(position_counts, num_simulations, base_table):
+def print_simulation_results(position_counts, num_simulations, base_table, table_counter):
     """
     Print the simulation results in a readable format.
     
@@ -444,17 +447,35 @@ def print_simulation_results(position_counts, num_simulations, base_table):
     print("\n📈 Final simulation results:")
     for team, pos_counter in position_counts.items():
         total_simulations = sum(pos_counter.values())
-        probabilities = [f"Pos {pos}: {count / total_simulations * 100:.3f}%" for pos, count in sorted(pos_counter.items())]
+        # Format each probability with three significant digits
+        probabilities = [f"Pos {pos}: {count / total_simulations * 100:.3g}%" for pos, count in sorted(pos_counter.items())]
         print(f"{team} - {current_points[team]} pts ({current_matches[team]}/{total_matches})\t│ {'  '.join(probabilities)}")
 
-    # Determine most frequent finishing position for each team (modal position)
-    modal_positions = {team: counter.most_common(1)[0][0] for team, counter in position_counts.items()}
-    # Sort teams by modal position and tie-breaker by highest count
-    sorted_modal = sorted(modal_positions.items(), key=lambda x: (x[1], -position_counts[x[0]][x[1]]))
-
-    # Print most frequent classification as a complete table
-    print("\n📋 Most frequent classification as a complete table:")
-    print("Pos\tTeam")
-    print("────────────────────────────────────────────")
-    for pos, (team, team_pos) in enumerate(sorted_modal, 1):
-        print(f"{pos}\t{team}")
+    # Print top probable full final tables
+    print(f"\n📋 Top {NUM_TOP_TABLES} probable full final tables:")
+    if table_counter:
+        for idx, (table, count) in enumerate(table_counter.most_common(NUM_TOP_TABLES), start=1):
+            pct = count / num_simulations * 100
+            # List each team with its finishing position, comma-separated
+            positions_list = [f"{pos}:{team}" for pos, team in enumerate(table, start=1)]
+            teams_line = ', '.join(positions_list)
+            print(f"{idx}. {teams_line} ({pct:.3g}%)")
+    else:
+        print("No full table data available.")
+    # Combine top candidates per position from the top tables
+    top_tables = [table for table, _ in table_counter.most_common(NUM_TOP_TABLES)]
+    if top_tables:
+        print("\n📊 Combined top candidates by position (from top tables):")
+        print("Pos\tCandidates")
+        num_top = len(top_tables)
+        # Number of teams in table
+        n_teams = len(top_tables[0])
+        # For each position, collect candidates
+        for pos in range(n_teams):  # 0-based
+            pos_counter = Counter(table[pos] for table in top_tables)
+            # Format candidates as 'Team (pct%)'
+            candidates = []
+            for team, count in pos_counter.most_common():
+                pct = count / num_top * 100
+                candidates.append(f"{team} ({pct:.3g}%)")
+            print(f"{pos+1}\t{', '.join(candidates)}")
