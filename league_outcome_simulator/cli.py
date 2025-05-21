@@ -14,6 +14,7 @@ from tqdm import tqdm
 import sys
 import importlib.util
 from pathlib import Path
+import msvcrt  # Added for non-blocking key detection on Windows
 
 # dependency check at startup
 required_packages = [
@@ -174,12 +175,26 @@ def main():
 
     # Run simulations
     print(f"🔄 Running up to {MAX_SIMULATIONS} simulations (max {MAX_SIMULATION_TIME_SECONDS}s)...")
-    for _ in tqdm(range(MAX_SIMULATIONS), desc="Simulating seasons", unit="simulation"):
+    print("Press 'q' to stop the simulation early.")
+    stop = False
+    sim_count = 0
+
+    for i in tqdm(range(MAX_SIMULATIONS), desc="Simulating seasons", unit="simulation"):
+        # Check for user key press to stop simulation early
+        if msvcrt.kbhit():
+            key = msvcrt.getch()
+            if key.lower() == b'q':
+                sim_count = i
+                print(f"⏸ Simulation stopped at simulation number {i}")
+                stop = True
+                break
+
         # Check if we've exceeded the maximum simulation time
         if time.time() - start_time > MAX_SIMULATION_TIME_SECONDS:
             print("⏳ Maximum simulation time reached. Stopping early.")
             break
 
+        sim_count = i + 1
         # Simulate the remainder of the season using Rust implementation
         simulated_results = simulate_season(base_table, fixtures, home_table, away_table)
         # Record the table ordering
