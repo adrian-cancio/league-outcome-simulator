@@ -176,6 +176,27 @@ def main():
     # Run simulations
     print(f"🔄 Running up to {MAX_SIMULATIONS} simulations (max {MAX_SIMULATION_TIME_SECONDS}s)...")
     print("Press 'q' to stop the simulation early.")
+    # Format maximum simulation time for display
+    secs = MAX_SIMULATION_TIME_SECONDS
+    # Break down into days, hours, minutes, seconds
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds_only = divmod(rem, 60)
+    # Build display parts only for non-zero units
+    parts = []
+    if days:
+        parts.append(f"{days} {'day' if days == 1 else 'days'}")
+    if hours:
+        parts.append(f"{hours} {'hour' if hours == 1 else 'hours'}")
+    if minutes:
+        parts.append(f"{minutes} {'minute' if minutes == 1 else 'minutes'}")
+    if seconds_only:
+        parts.append(f"{seconds_only} {'second' if seconds_only == 1 else 'seconds'}")
+    # Ensure at least seconds are displayed
+    if not parts:
+        parts.append("0 seconds")
+    duration_str = ', '.join(parts)
+    print(f"⏳ Note: Maximum simulation time is {duration_str}.")
     stop = False
     sim_count = 0
 
