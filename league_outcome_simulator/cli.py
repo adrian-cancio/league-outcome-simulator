@@ -30,7 +30,7 @@ if missing:
 from .data import SofaScoreClient
 from .simulation import simulate_season
 from .visualization import visualize_results, print_simulation_results
-from .utils import process_team_colors
+from .utils import process_team_colors, format_duration
 
 # Configuration constants
 MAX_SIMULATIONS = 1_000_000  # Maximum number of simulations
@@ -176,27 +176,9 @@ def main():
     # Run simulations
     print(f"🔄 Running up to {MAX_SIMULATIONS} simulations (max {MAX_SIMULATION_TIME_SECONDS}s)...")
     print("Press 'q' to stop the simulation early.")
-    # Format maximum simulation time for display
-    secs = MAX_SIMULATION_TIME_SECONDS
-    # Break down into days, hours, minutes, seconds
-    days, rem = divmod(secs, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, seconds_only = divmod(rem, 60)
-    # Build display parts only for non-zero units
-    parts = []
-    if days:
-        parts.append(f"{days} {'day' if days == 1 else 'days'}")
-    if hours:
-        parts.append(f"{hours} {'hour' if hours == 1 else 'hours'}")
-    if minutes:
-        parts.append(f"{minutes} {'minute' if minutes == 1 else 'minutes'}")
-    if seconds_only:
-        parts.append(f"{seconds_only} {'second' if seconds_only == 1 else 'seconds'}")
-    # Ensure at least seconds are displayed
-    if not parts:
-        parts.append("0 seconds")
-    duration_str = ', '.join(parts)
-    print(f"⏳ Note: Maximum simulation time is {duration_str}.")
+    # Display maximum simulation time using reusable formatter
+    max_time_str = format_duration(MAX_SIMULATION_TIME_SECONDS)
+    print(f"⏳ Note: Maximum simulation time is {max_time_str}.")
     stop = False
     sim_count = 0
 
@@ -228,6 +210,10 @@ def main():
     num_simulations = sum(sum(counter.values()) for counter in position_counts.values()) // len(position_counts)
     print(f"✅ Completed {num_simulations} simulations")
 
+    # Record end time and calculate elapsed time for the simulation
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+
     # Process team colors for visualization
     processed_colors = process_team_colors(team_colors)
 
@@ -237,7 +223,9 @@ def main():
     time_str = datetime.now().strftime('%H-%M-%S')  # HH-MM-SS
     run_dir = Path('results') / sanitized_league / date_str / time_str
     # Print text results
-    print_simulation_results(position_counts, num_simulations, base_table, table_counter, run_dir)
+    # Pass number of remaining fixtures for match count calculations
+    num_fixtures = len(fixtures)
+    print_simulation_results(position_counts, num_simulations, base_table, table_counter, run_dir, elapsed_time, num_fixtures)
     # Show visualization and save image
     visualize_results(position_counts, num_simulations, processed_colors, base_table, run_dir)
 

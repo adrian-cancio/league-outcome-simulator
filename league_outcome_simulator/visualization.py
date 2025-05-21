@@ -5,14 +5,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from collections import Counter
 from .utils import (
-    get_color_luminance, 
-    are_colors_similar, 
-    darken_color, 
-    deterministic_hex_color, 
-    deterministic_secondary_color, 
-    get_contrasting_text_color, 
+    get_color_luminance,
+    are_colors_similar,
+    darken_color,
+    deterministic_hex_color,
+    deterministic_secondary_color,
+    get_contrasting_text_color,
     is_good_contrast,
-    process_team_colors
+    process_team_colors,
+    format_duration
 )
 import os
 from datetime import datetime
@@ -431,7 +432,7 @@ def visualize_results(position_counts, num_simulations, team_colors, base_table,
     print(f"Saved chart to {image_file}")
     plt.show()
 
-def print_simulation_results(position_counts, num_simulations, base_table, table_counter, run_dir):
+def print_simulation_results(position_counts, num_simulations, base_table, table_counter, run_dir, elapsed_time, num_fixtures):
     """
     Print the simulation results in a readable format.
     
@@ -439,10 +440,16 @@ def print_simulation_results(position_counts, num_simulations, base_table, table
         position_counts: Dictionary mapping team names to Counter objects with position frequencies
         num_simulations: Total number of simulations performed
         base_table: Current league standings table
+        table_counter: Counter of full final table occurrences
+        run_dir: Path to save results
+        elapsed_time: Float, total time in seconds that simulations took
+        num_fixtures: Number of fixtures simulated per iteration
     """
-    # Ensure output directory exists and prepare text file path
     run_dir.mkdir(parents=True, exist_ok=True)
     txt_file = run_dir / 'simulation.txt'
+    # Summary of iterations and elapsed time in human-readable format
+    summary_line = f"Iterations run: {num_simulations}, elapsed time: {format_duration(elapsed_time)}"
+    print(summary_line)
     # Calculate current points, matches, and total matches from base_table
     current_points = {}
     current_matches = {}
@@ -454,10 +461,20 @@ def print_simulation_results(position_counts, num_simulations, base_table, table
         current_points[team_name] = int(row[7])  # Points are at index 7
         current_matches[team_name] = int(row[1])  # Matches are at index 1
 
-    # Print and save final simulation results
-    header = "📈 Final simulation results:" 
-    print(header)
+    # Additional simulation stats based on remaining fixtures
+    iters_per_sec = num_simulations / elapsed_time if elapsed_time else 0
+    total_matches_simulated = num_simulations * num_fixtures
+    stats_line_1 = f"Avg iterations per second: {iters_per_sec:.2f}"
+    stats_line_2 = f"Total matches simulated: {total_matches_simulated} (matches per iteration: {num_fixtures})"
+    print(stats_line_1)
+    print(stats_line_2)
+    header = "📈 Final simulation results:"
     with open(txt_file, 'w', encoding='utf-8') as f:
+        # Write summary and header to file
+        f.write(summary_line + "\n")
+        # Write additional stats before header to match console order
+        f.write(stats_line_1 + "\n")
+        f.write(stats_line_2 + "\n")
         f.write(header + "\n")
         # Prepare fixed-width prefixes for alignment
         prefixes = {
@@ -465,7 +482,7 @@ def print_simulation_results(position_counts, num_simulations, base_table, table
             for team in position_counts
         }
         max_prefix_len = max(len(p) for p in prefixes.values())
-         # Team probabilities by position
+        # Team probabilities by position
         for team, pos_counter in position_counts.items():
             total = sum(pos_counter.values())
             probs = [f"Pos {pos}: {count/total*100:.3g}%" for pos, count in sorted(pos_counter.items())]

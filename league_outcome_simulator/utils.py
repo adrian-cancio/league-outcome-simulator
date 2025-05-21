@@ -164,3 +164,35 @@ def process_team_colors(team_colors):
         }
         
     return processed_colors
+
+def format_duration(seconds: float) -> str:
+    """
+    Format a duration given in seconds into a human-readable string.
+
+    Args:
+        seconds: Duration in seconds.
+
+    Returns:
+        A string expressing the duration in days, hours, minutes, and seconds.
+    """
+    # Convert to total milliseconds and split
+    total_ms = int(round(seconds * 1000))
+    ms = total_ms % 1000
+    total_seconds = total_ms // 1000
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds_only = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} {'day' if days == 1 else 'days'}")
+    if hours:
+        parts.append(f"{hours} {'hour' if hours == 1 else 'hours'}")
+    if minutes:
+        parts.append(f"{minutes} {'minute' if minutes == 1 else 'minutes'}")
+    # Include seconds if non-zero or if no larger units
+    if seconds_only or not parts:
+        parts.append(f"{seconds_only} {'second' if seconds_only == 1 else 'seconds'}")
+    # Include milliseconds if any remain
+    if ms:
+        parts.append(f"{ms} {'millisecond' if ms == 1 else 'milliseconds'}")
+    return ', '.join(parts)
