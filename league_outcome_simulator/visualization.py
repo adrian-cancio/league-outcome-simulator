@@ -31,7 +31,7 @@ def visualize_results(position_counts, num_simulations, team_colors, base_table,
         team_colors: Dictionary mapping team names to primary/secondary colors
         base_table: Current league standings table
     """
-    print("\n📊 Showing results in chart...")
+    print("📊 Showing results in chart...")
     
     # Process team colors to fill in any missing values
     team_colors = process_team_colors(team_colors)
@@ -455,7 +455,7 @@ def print_simulation_results(position_counts, num_simulations, base_table, table
         current_matches[team_name] = int(row[1])  # Matches are at index 1
 
     # Print and save final simulation results
-    header = "\n📈 Final simulation results:" 
+    header = "📈 Final simulation results:" 
     print(header)
     with open(txt_file, 'w', encoding='utf-8') as f:
         f.write(header + "\n")
@@ -475,7 +475,7 @@ def print_simulation_results(position_counts, num_simulations, base_table, table
             print(line)
             f.write(line + "\n")
         # Top full table predictions
-        top_header = f"\n📋 Top {NUM_TOP_TABLES} probable full final tables:" 
+        top_header = f"📋 Top {NUM_TOP_TABLES} probable full final tables:" 
         print(top_header)
         f.write(top_header + "\n")
         if table_counter:
@@ -490,7 +490,7 @@ def print_simulation_results(position_counts, num_simulations, base_table, table
             print(none_msg)
             f.write(none_msg + "\n")
         # Combined top candidates by position
-        combined_header = "\n📊 Combined top candidates by position (from top tables):"
+        combined_header = "📊 Combined top candidates by position (from top tables):"
         print(combined_header)
         f.write(combined_header + "\n")
         top_tables = [table for table, _ in table_counter.most_common(NUM_TOP_TABLES)]

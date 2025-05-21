@@ -235,7 +235,7 @@ class SofaScoreClient:
             
         default_blue = "#374df5"  # Common default color from API
         
-        print("\n🎨 Loading team colors...")
+        print("🎨 Loading team colors...")
         # Process all teams from the standings
         for standing in data.get("standings", []):
             for row in standing.get("rows", []):

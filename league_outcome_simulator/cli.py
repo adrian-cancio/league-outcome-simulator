@@ -72,7 +72,7 @@ def initialize_global_driver():
     """Initialize the global Selenium driver if it doesn't exist."""
     global GLOBAL_DRIVER
     if GLOBAL_DRIVER is None:
-        print("🔄 Initializing global Selenium driver...")
+        print("🔄 Initializing global Selenium driver...", end="", flush=True)
         chrome_options = Options()
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--disable-gpu")
