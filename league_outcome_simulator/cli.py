@@ -31,10 +31,12 @@ from .data import SofaScoreClient
 from .simulation import simulate_season
 from .visualization import visualize_results, print_simulation_results
 from .utils import process_team_colors, format_duration
+from .error_estimation import calculate_pp_error # Added import
 
 # Configuration constants
 MAX_SIMULATIONS = 1_000_000  # Maximum number of simulations
 MAX_SIMULATION_TIME_SECONDS = 600  # Maximum simulation time in seconds (10 minutes)
+TARGET_PP_ERROR = 0.01  # Target Percentage Point error to stop simulation
 HOME_ADVANTAGE = 1.25  # Home advantage factor (1.0 = neutral, higher = more advantage)
 NUM_WORKERS = max(1, os.cpu_count() - 1)  # Use all CPU cores but one
 
@@ -178,36 +180,51 @@ def main():
     print("Press 'q' to stop the simulation early.")
     # Display maximum simulation time using reusable formatter
     max_time_str = format_duration(MAX_SIMULATION_TIME_SECONDS)
-    print(f"⏳ Note: Maximum simulation time is {max_time_str}.")
-    stop = False
-    sim_count = 0
+    # Updated note to include all stopping conditions
+    print(f"⏳ Note: Simulation will stop if it reaches {MAX_SIMULATIONS:,} simulations, {max_time_str}, or a PP Error of {TARGET_PP_ERROR:.3f} pp, whichever comes first.")
+    sim_count_completed = 0 # Renamed from sim_count for clarity, tracks completed simulations
+    last_error_update_time = time.time() # Initialize time for error update
 
-    for i in tqdm(range(MAX_SIMULATIONS), desc="Simulating seasons", unit="simulation"):
-        # Check for user key press to stop simulation early
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
-            if key.lower() == b'q':
-                sim_count = i
-                print(f"⏸ Simulation stopped at simulation number {i}")
-                stop = True
-                break
+    # Explicitly create tqdm instance to control it
+    with tqdm(total=MAX_SIMULATIONS, desc="Simulating seasons", unit="simulation", leave=True) as pbar:
+        for i in range(MAX_SIMULATIONS): # Loop up to MAX_SIMULATIONS
+            # Check for user key press to stop simulation early
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key.lower() == b'q':
+                    tqdm.write(f"⏸ Simulation stopped by user after {sim_count_completed} simulations.")
+                    break # Exit the loop
 
-        # Check if we've exceeded the maximum simulation time
-        if time.time() - start_time > MAX_SIMULATION_TIME_SECONDS:
-            print("⏳ Maximum simulation time reached. Stopping early.")
-            break
+            # Check if we've exceeded the maximum simulation time
+            if time.time() - start_time > MAX_SIMULATION_TIME_SECONDS:
+                tqdm.write(f"⏳ Maximum simulation time reached after {sim_count_completed} simulations. Stopping early.")
+                break # Exit the loop
 
-        sim_count = i + 1
-        # Simulate the remainder of the season using Rust implementation
-        simulated_results = simulate_season(base_table, fixtures, home_table, away_table)
-        # Record the table ordering
-        table_counter[tuple(team for team, _ in simulated_results)] += 1
-        # Record the positions from this simulation
-        for pos, (team, _) in enumerate(simulated_results, 1):
-            position_counts[team][pos] += 1
+            # Simulate the remainder of the season using Rust implementation
+            simulated_results = simulate_season(base_table, fixtures, home_table, away_table)
+            # Record the table ordering
+            table_counter[tuple(team for team, _ in simulated_results)] += 1
+            # Record the positions from this simulation
+            for pos, (team, _) in enumerate(simulated_results, 1):
+                position_counts[team][pos] += 1
 
-    # Calculate the actual number of simulations completed
-    num_simulations = sum(sum(counter.values()) for counter in position_counts.values()) // len(position_counts)
+            sim_count_completed += 1 # Increment after a successful simulation
+            pbar.update(1) # Manually update the progress bar by 1
+
+            # Update and display error every 5 seconds
+            current_time = time.time()
+            if current_time - last_error_update_time >= 5:
+                num_teams = len(position_counts)
+                if sim_count_completed > 0:
+                    pp_error = calculate_pp_error(position_counts, sim_count_completed, num_teams)
+                    pbar.set_postfix_str(f"Error: {pp_error:.3f} pp")
+                    if pp_error <= TARGET_PP_ERROR:
+                        tqdm.write(f"🎯 Target PP Error of {TARGET_PP_ERROR:.3f} pp reached after {sim_count_completed} simulations. Stopping early.")
+                        break  # Exit the loop
+                last_error_update_time = current_time
+
+    # num_simulations will now be the accurately tracked sim_count_completed
+    num_simulations = sim_count_completed
     print(f"✅ Completed {num_simulations} simulations")
 
     # Record end time and calculate elapsed time for the simulation
@@ -226,6 +243,18 @@ def main():
     # Pass number of remaining fixtures for match count calculations
     num_fixtures = len(fixtures)
     print_simulation_results(position_counts, num_simulations, base_table, table_counter, run_dir, elapsed_time, num_fixtures)
+    
+    # Calculate and print final PP error
+    if num_simulations > 0:
+        num_teams = len(position_counts)
+        final_pp_error = calculate_pp_error(position_counts, num_simulations, num_teams)
+        # Removed '%' from the print output
+        print(f"📊 Final Average Percentage Point Error: {final_pp_error:.3f}")
+        # Optionally, save this to the simulation.txt file
+        with open(run_dir / 'simulation.txt', 'a', encoding='utf-8') as f:
+            # Removed '%' from the file output
+            f.write(f"Final Average Percentage Point Error: {final_pp_error:.3f}\\n")
+
     # Show visualization and save image
     visualize_results(position_counts, num_simulations, processed_colors, base_table, run_dir)
 
