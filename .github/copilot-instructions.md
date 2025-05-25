@@ -47,3 +47,4 @@ Each part must reside in its designated location to ensure consistency and facil
 ## Post-Change Verification
 - After implementing any code changes or new features, always review the `README.md` file.
 - If the changes affect the project's setup, usage, or overall architecture, update the `README.md` accordingly to reflect these modifications.
+- **If changes involve adding, removing, or altering dependencies, ensure `requirements.txt` (for Python) and/or `Cargo.toml` (for Rust) are updated accordingly.**
