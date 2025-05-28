@@ -15,6 +15,8 @@ import sys
 import importlib.util
 from pathlib import Path
 import msvcrt  # Added for non-blocking key detection on Windows
+import concurrent.futures
+import threading
 
 # dependency check at startup
 required_packages = [
@@ -187,41 +189,86 @@ def main():
 
     # Explicitly create tqdm instance to control it
     with tqdm(total=MAX_SIMULATIONS, desc="Simulating seasons", unit="simulation", leave=True) as pbar:
-        for i in range(MAX_SIMULATIONS): # Loop up to MAX_SIMULATIONS
-            # Check for user key press to stop simulation early
-            if msvcrt.kbhit():
-                key = msvcrt.getch()
-                if key.lower() == b'q':
-                    tqdm.write(f"⏸ Simulation stopped by user after {sim_count_completed} simulations.")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+            futures = []
+            # Submit initial batch of simulations
+            for _ in range(min(MAX_SIMULATIONS, NUM_WORKERS * 2)): # Submit a reasonable initial batch
+                if len(futures) + sim_count_completed < MAX_SIMULATIONS:
+                    futures.append(executor.submit(simulate_season, base_table, fixtures, home_table, away_table))
+
+            while sim_count_completed < MAX_SIMULATIONS and futures:
+                # Check for user key press to stop simulation early
+                if msvcrt.kbhit():
+                    key = msvcrt.getch()
+                    if key.lower() == b'q':
+                        tqdm.write(f"⏸ Simulation stopped by user after {sim_count_completed} simulations.")
+                        # Cancel pending futures
+                        for future in futures:
+                            future.cancel()
+                        futures = [] # Clear the list
+                        break # Exit the loop
+
+                # Check if we've exceeded the maximum simulation time
+                if time.time() - start_time > MAX_SIMULATION_TIME_SECONDS:
+                    tqdm.write(f"⏳ Maximum simulation time reached after {sim_count_completed} simulations. Stopping early.")
+                    for future in futures:
+                        future.cancel()
+                    futures = []
                     break # Exit the loop
+                
+                # Process completed futures
+                done_futures, not_done_futures_set = concurrent.futures.wait(futures, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED)
+                futures = list(not_done_futures_set)
 
-            # Check if we've exceeded the maximum simulation time
-            if time.time() - start_time > MAX_SIMULATION_TIME_SECONDS:
-                tqdm.write(f"⏳ Maximum simulation time reached after {sim_count_completed} simulations. Stopping early.")
-                break # Exit the loop
+                for future in done_futures:
+                    if future.cancelled():
+                        continue
+                    try:
+                        simulated_results = future.result()
+                        # Record the table ordering
+                        table_counter[tuple(team for team, _ in simulated_results)] += 1
+                        # Record the positions from this simulation
+                        for pos, (team, _) in enumerate(simulated_results, 1):
+                            position_counts[team][pos] += 1
+                        
+                        sim_count_completed += 1 # Increment after a successful simulation
+                        pbar.update(1) # Manually update the progress bar by 1
 
-            # Simulate the remainder of the season using Rust implementation
-            simulated_results = simulate_season(base_table, fixtures, home_table, away_table)
-            # Record the table ordering
-            table_counter[tuple(team for team, _ in simulated_results)] += 1
-            # Record the positions from this simulation
-            for pos, (team, _) in enumerate(simulated_results, 1):
-                position_counts[team][pos] += 1
+                        # Submit a new task if we haven't reached the max
+                        if len(futures) + sim_count_completed < MAX_SIMULATIONS:
+                             futures.append(executor.submit(simulate_season, base_table, fixtures, home_table, away_table))
 
-            sim_count_completed += 1 # Increment after a successful simulation
-            pbar.update(1) # Manually update the progress bar by 1
+                    except Exception as e:
+                        tqdm.write(f"Error in simulation thread: {e}")
 
-            # Update and display error every 5 seconds
-            current_time = time.time()
-            if current_time - last_error_update_time >= 5:
-                num_teams = len(position_counts)
-                if sim_count_completed > 0:
-                    pp_error = calculate_pp_error(position_counts, sim_count_completed, num_teams)
-                    pbar.set_postfix_str(f"Error: {pp_error:.3f} pp")
-                    if pp_error <= TARGET_PP_ERROR:
-                        tqdm.write(f"🎯 Target PP Error of {TARGET_PP_ERROR:.3f} pp reached after {sim_count_completed} simulations. Stopping early.")
-                        break  # Exit the loop
-                last_error_update_time = current_time
+
+                # Update and display error every 5 seconds (based on main thread time)
+                current_time = time.time()
+                if current_time - last_error_update_time >= 5:
+                    num_teams = len(position_counts)
+                    if sim_count_completed > 0:
+                        pp_error = calculate_pp_error(position_counts, sim_count_completed, num_teams)
+                        pbar.set_postfix_str(f"Error: {pp_error:.3f} pp")
+                        if pp_error <= TARGET_PP_ERROR:
+                            tqdm.write(f"🎯 Target PP Error of {TARGET_PP_ERROR:.3f} pp reached after {sim_count_completed} simulations. Stopping early.")
+                            for future_to_cancel in futures: # Corrected variable name
+                                future_to_cancel.cancel()
+                            futures = []
+                            break  # Exit the inner while loop
+                    last_error_update_time = current_time
+                
+                if not futures and sim_count_completed < MAX_SIMULATIONS : # if all futures are processed and we need more
+                    # Resubmit if necessary, e.g. if previous batch was small or many were cancelled
+                    for _ in range(min(MAX_SIMULATIONS - sim_count_completed, NUM_WORKERS * 2)):
+                        if len(futures) + sim_count_completed < MAX_SIMULATIONS:
+                             futures.append(executor.submit(simulate_season, base_table, fixtures, home_table, away_table))
+            
+            # Final cleanup of any remaining futures if the loop was exited by other means
+            for future in futures:
+                future.cancel()
+            
+            # Ensure executor is properly shut down (though context manager does this)
+            executor.shutdown(wait=False, cancel_futures=True)
 
     # num_simulations will now be the accurately tracked sim_count_completed
     num_simulations = sim_count_completed
