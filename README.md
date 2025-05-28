@@ -206,23 +206,6 @@ league-outcome-simulator/
 *   **Python**: Listed in `requirements.txt`. Key dependencies include `selenium` (for web scraping), `pandas` (for data handling, though less prominent in CLI), `numpy`, `scipy`.
 *   **Rust**: Listed in `Cargo.toml`. Key dependencies include `pyo3` (for Python bindings), `rand` (for random number generation), `rayon` (for parallelism).
 
-## Future Ideas & Potential Enhancements
-
-*   **Python-level Parallelism**: The CLI now uses `concurrent.futures.ThreadPoolExecutor` to parallelize calls to the `simulate_season` Rust function. This provides a level of parallelism at the Python script level.
-*   **Direct Rust Bulk Simulation**: Modify `cli.py` to utilize the `simulate_bulk` function available in the Rust library. This would move the entire Monte Carlo loop into Rust, potentially offering further performance gains by minimizing Python-Rust inter-process communication overhead compared to the current Python-driven threading.
-*   **Advanced Statistical Models**:
-    *   Implement Bayesian hierarchical models for team strength estimation.
-    *   Explore machine learning approaches (e.g., using historical match data and team/player features).
-*   **Parameter Optimization**: Add functionality to optimize model parameters (e.g., `rho` in Dixon-Coles, home advantage factor) using historical league data.
-*   **Expanded Data Integration**:
-    *   Incorporate player-level statistics (injuries, suspensions, form).
-    *   Use betting odds to inform simulations or validate model outputs.
-*   **Web Interface**: Develop a user-friendly web application (e.g., using Flask or Django) for easier interaction, configuration, and richer visualization of results.
-*   **Graphical Visualizations**: Enhance `visualization.py` to generate plots (e.g., bar charts of position probabilities, evolution of probabilities over time if simulating week-by-week).
-*   **Customizable Tie-Breaking Rules**: Allow users to define or select different tie-breaking rules if they vary by league.
-*   **In-Play Probabilities**: Extend the model to calculate and update probabilities live as matches are being played.
-*   **Historical Season Analysis**: Add functionality to load historical data and test model accuracy against past seasons.
-
 ## License
 
 [MIT License](LICENSE)
