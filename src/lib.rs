@@ -188,9 +188,9 @@ fn simulate_season(
         m: i64,
     }
     let mut standings: HashMap<String, Stats> = HashMap::new();
-    // Home-only and away-only scoring rates
-    let mut home_stats: HashMap<String, (i64, i64)> = HashMap::new(); // (goals, matches)
-    let mut away_stats: HashMap<String, (i64, i64)> = HashMap::new();
+    // Home-only and away-only stats: (goals_for, goals_against, matches)
+    let mut home_stats: HashMap<String, (i64, i64, i64)> = HashMap::new();
+    let mut away_stats: HashMap<String, (i64, i64, i64)> = HashMap::new();
 
     // Initialize standings from base_table (skip header)
     for row in base.iter().skip(1) {
@@ -208,7 +208,8 @@ fn simulate_season(
         let team: String = row_list.get_item(0)?.extract()?;
         let m: i64 = row_list.get_item(1)?.extract()?;
         let gf: i64 = row_list.get_item(5)?.extract()?;
-        home_stats.insert(team, (gf, m));
+        let ga: i64 = row_list.get_item(6)?.extract()?;
+        home_stats.insert(team, (gf, ga, m));
     }
     // Initialize away_stats from away_list (skip header)
     for row in away_list.iter().skip(1) {
@@ -216,8 +217,27 @@ fn simulate_season(
         let team: String = row_list.get_item(0)?.extract()?;
         let m: i64 = row_list.get_item(1)?.extract()?;
         let gf: i64 = row_list.get_item(5)?.extract()?;
-        away_stats.insert(team, (gf, m));
+        let ga: i64 = row_list.get_item(6)?.extract()?;
+        away_stats.insert(team, (gf, ga, m));
     }
+
+    // Calculate league average goals per team per match
+    let total_gf: i64 = standings.values().map(|s| s.gf).sum();
+    let total_matches: i64 = standings.values().map(|s| s.m).sum();
+    let avg_league_goals = if total_matches > 0 {
+        total_gf as f64 / total_matches as f64
+    } else {
+        DEFAULT_LAMBDA
+    };
+
+    // Calculate dynamic home advantage from actual data
+    let home_total_gf: i64 = home_stats.values().map(|(gf, _, _)| gf).sum();
+    let away_total_gf: i64 = away_stats.values().map(|(gf, _, _)| gf).sum();
+    let home_advantage = if away_total_gf > 0 {
+        (home_total_gf as f64 / away_total_gf as f64).clamp(1.0, 1.5)
+    } else {
+        HOME_ADVANTAGE
+    };
 
     let mut rng = thread_rng();
     // Simulate each fixture
@@ -247,61 +267,54 @@ fn simulate_season(
             .ok_or_else(|| PyValueError::new_err("Missing title in away object"))?
             .extract()?;
 
-        // Compute lambdas
-        let sh = match standings.get(&h_team) {
-            Some(stats) => stats.clone(),
-            None => {
-                return Err(PyValueError::new_err(format!(
-                    "Team {} not found in standings",
-                    h_team
-                )))
-            }
+        // Verify teams exist in standings
+        if !standings.contains_key(&h_team) {
+            return Err(PyValueError::new_err(format!(
+                "Team {} not found in standings",
+                h_team
+            )));
+        }
+        if !standings.contains_key(&a_team) {
+            return Err(PyValueError::new_err(format!(
+                "Team {} not found in standings",
+                a_team
+            )));
+        }
+
+        // Attack/Defense model: lambda considers both team's attack AND opponent's defense
+        // Get home team's attack strength (goals scored at home / league avg)
+        let (home_gf, home_ga, home_m) = home_stats.get(&h_team).copied().unwrap_or((0, 0, 0));
+        let attack_h = if home_m > 0 && avg_league_goals > 0.0 {
+            (home_gf as f64 / home_m as f64) / avg_league_goals
+        } else {
+            1.0
+        };
+        // Get home team's defense strength (goals conceded at home / league avg)
+        let defense_h = if home_m > 0 && avg_league_goals > 0.0 {
+            (home_ga as f64 / home_m as f64) / avg_league_goals
+        } else {
+            1.0
         };
 
-        let sa = match standings.get(&a_team) {
-            Some(stats) => stats.clone(),
-            None => {
-                return Err(PyValueError::new_err(format!(
-                    "Team {} not found in standings",
-                    a_team
-                )))
-            }
+        // Get away team's attack strength (goals scored away / league avg)
+        let (away_gf, away_ga, away_m) = away_stats.get(&a_team).copied().unwrap_or((0, 0, 0));
+        let attack_a = if away_m > 0 && avg_league_goals > 0.0 {
+            (away_gf as f64 / away_m as f64) / avg_league_goals
+        } else {
+            1.0
+        };
+        // Get away team's defense strength (goals conceded away / league avg)
+        let defense_a = if away_m > 0 && avg_league_goals > 0.0 {
+            (away_ga as f64 / away_m as f64) / avg_league_goals
+        } else {
+            1.0
         };
 
-        // Compute global scoring rates
-        let global_h = if sh.m > 0 {
-            sh.gf as f64 / sh.m as f64
-        } else {
-            DEFAULT_LAMBDA
-        };
-        let global_a = if sa.m > 0 {
-            sa.gf as f64 / sa.m as f64
-        } else {
-            DEFAULT_LAMBDA
-        };
-        // Get venue-specific rates and average with global
-        let home_rate = home_stats
-            .get(&h_team)
-            .map(|&(gf, m)| {
-                if m > 0 {
-                    gf as f64 / m as f64
-                } else {
-                    global_h
-                }
-            })
-            .unwrap_or(global_h);
-        let away_rate = away_stats
-            .get(&a_team)
-            .map(|&(gf, m)| {
-                if m > 0 {
-                    gf as f64 / m as f64
-                } else {
-                    global_a
-                }
-            })
-            .unwrap_or(global_a);
-        let lambda_h = ((global_h + home_rate) / 2.0) * HOME_ADVANTAGE;
-        let lambda_a = (global_a + away_rate) / 2.0;
+        // Calculate lambdas using attack/defense model
+        // Home team's expected goals = league_avg * home_attack * away_defense * home_advantage
+        // Away team's expected goals = league_avg * away_attack * home_defense
+        let lambda_h = avg_league_goals * attack_h * defense_a * home_advantage;
+        let lambda_a = avg_league_goals * attack_a * defense_h;
 
         // Simulate match using appropriate method
         let (gh, ga) = FootballSimulation::simulate_match(&mut rng, lambda_h, lambda_a);
@@ -429,8 +442,8 @@ fn simulate_bulk(
         })
         .collect();
 
-    // Parse home_stats from home_list (gf, m)
-    let home_stats_map: HashMap<String, (i64, i64)> = home_list
+    // Parse home_stats from home_list (gf, ga, m)
+    let home_stats_map: HashMap<String, (i64, i64, i64)> = home_list
         .iter()
         .skip(1)
         .map(|row| {
@@ -438,12 +451,13 @@ fn simulate_bulk(
             let team: String = row_list.get_item(0).unwrap().extract().unwrap();
             let m: i64 = row_list.get_item(1).unwrap().extract().unwrap();
             let gf: i64 = row_list.get_item(5).unwrap().extract().unwrap();
-            (team, (gf, m))
+            let ga: i64 = row_list.get_item(6).unwrap().extract().unwrap();
+            (team, (gf, ga, m))
         })
         .collect();
 
-    // Parse away_stats from away_list (gf, m)
-    let away_stats_map: HashMap<String, (i64, i64)> = away_list
+    // Parse away_stats from away_list (gf, ga, m)
+    let away_stats_map: HashMap<String, (i64, i64, i64)> = away_list
         .iter()
         .skip(1)
         .map(|row| {
@@ -451,11 +465,30 @@ fn simulate_bulk(
             let team: String = row_list.get_item(0).unwrap().extract().unwrap();
             let m: i64 = row_list.get_item(1).unwrap().extract().unwrap();
             let gf: i64 = row_list.get_item(5).unwrap().extract().unwrap();
-            (team, (gf, m))
+            let ga: i64 = row_list.get_item(6).unwrap().extract().unwrap();
+            (team, (gf, ga, m))
         })
         .collect();
 
     let num_teams = teams.len();
+
+    // Calculate league average goals per team per match
+    let total_gf: i64 = initial_stats.values().map(|s| s.gf).sum();
+    let total_matches: i64 = initial_stats.values().map(|s| s.m).sum();
+    let avg_league_goals = if total_matches > 0 {
+        total_gf as f64 / total_matches as f64
+    } else {
+        DEFAULT_LAMBDA
+    };
+
+    // Calculate dynamic home advantage from actual data
+    let home_total_gf: i64 = home_stats_map.values().map(|(gf, _, _)| gf).sum();
+    let away_total_gf: i64 = away_stats_map.values().map(|(gf, _, _)| gf).sum();
+    let home_advantage = if away_total_gf > 0 {
+        (home_total_gf as f64 / away_total_gf as f64).clamp(1.0, 1.5)
+    } else {
+        HOME_ADVANTAGE
+    };
 
     // Parallel batch simulations using Dixon-Coles for each match
     let counts: HashMap<String, Vec<u64>> = (0..n_sims)
@@ -467,56 +500,38 @@ fn simulate_bulk(
                 let mut standings: HashMap<String, BulkStats> = initial_stats.clone();
 
                 for (h_team, a_team) in &fixtures_vec {
-                    let sh = standings.get(h_team).cloned().unwrap_or(BulkStats {
-                        pts: 0,
-                        gf: 0,
-                        ga: 0,
-                        m: 0,
-                    });
-                    let sa = standings.get(a_team).cloned().unwrap_or(BulkStats {
-                        pts: 0,
-                        gf: 0,
-                        ga: 0,
-                        m: 0,
-                    });
-
-                    // Compute global scoring rates
-                    let global_h = if sh.m > 0 {
-                        sh.gf as f64 / sh.m as f64
+                    // Attack/Defense model: lambda considers both team's attack AND opponent's defense
+                    // Get home team's attack and defense strength
+                    let (home_gf, home_ga, home_m) =
+                        home_stats_map.get(h_team).copied().unwrap_or((0, 0, 0));
+                    let attack_h = if home_m > 0 && avg_league_goals > 0.0 {
+                        (home_gf as f64 / home_m as f64) / avg_league_goals
                     } else {
-                        DEFAULT_LAMBDA
+                        1.0
                     };
-                    let global_a = if sa.m > 0 {
-                        sa.gf as f64 / sa.m as f64
+                    let defense_h = if home_m > 0 && avg_league_goals > 0.0 {
+                        (home_ga as f64 / home_m as f64) / avg_league_goals
                     } else {
-                        DEFAULT_LAMBDA
+                        1.0
                     };
 
-                    // Get venue-specific rates
-                    let home_rate = home_stats_map
-                        .get(h_team)
-                        .map(|&(gf, m)| {
-                            if m > 0 {
-                                gf as f64 / m as f64
-                            } else {
-                                global_h
-                            }
-                        })
-                        .unwrap_or(global_h);
-                    let away_rate = away_stats_map
-                        .get(a_team)
-                        .map(|&(gf, m)| {
-                            if m > 0 {
-                                gf as f64 / m as f64
-                            } else {
-                                global_a
-                            }
-                        })
-                        .unwrap_or(global_a);
+                    // Get away team's attack and defense strength
+                    let (away_gf, away_ga, away_m) =
+                        away_stats_map.get(a_team).copied().unwrap_or((0, 0, 0));
+                    let attack_a = if away_m > 0 && avg_league_goals > 0.0 {
+                        (away_gf as f64 / away_m as f64) / avg_league_goals
+                    } else {
+                        1.0
+                    };
+                    let defense_a = if away_m > 0 && avg_league_goals > 0.0 {
+                        (away_ga as f64 / away_m as f64) / avg_league_goals
+                    } else {
+                        1.0
+                    };
 
-                    // Calculate lambdas (same formula as simulate_season)
-                    let lambda_h = ((global_h + home_rate) / 2.0) * HOME_ADVANTAGE;
-                    let lambda_a = (global_a + away_rate) / 2.0;
+                    // Calculate lambdas using attack/defense model
+                    let lambda_h = avg_league_goals * attack_h * defense_a * home_advantage;
+                    let lambda_a = avg_league_goals * attack_a * defense_h;
 
                     // Simulate the match
                     let (gh, ga) = FootballSimulation::simulate_match(rng, lambda_h, lambda_a);
