@@ -1,8 +1,9 @@
 """
 Football probability simulation main module.
-This program calculates the probabilities of different final league positions 
+This program calculates the probabilities of different final league positions
 for teams in various football leagues based on current standings and remaining fixtures.
 """
+
 import time
 import os
 from datetime import datetime
@@ -19,9 +20,7 @@ import concurrent.futures
 import threading
 
 # dependency check at startup
-required_packages = [
-    "selenium", "tqdm", "pandas", "matplotlib", "numpy", "scipy"
-]
+required_packages = ["selenium", "tqdm", "pandas", "matplotlib", "numpy", "scipy"]
 missing = [pkg for pkg in required_packages if importlib.util.find_spec(pkg) is None]
 if missing:
     print(f"❌ Missing dependencies: {', '.join(missing)}")
@@ -30,10 +29,10 @@ if missing:
 
 # Use package-relative imports
 from .data import SofaScoreClient
-from .simulation import simulate_season
+from .simulation import simulate_season, simulate_bulk
 from .visualization import visualize_results, print_simulation_results
 from .utils import process_team_colors, format_duration
-from .error_estimation import calculate_pp_error # Added import
+from .error_estimation import calculate_pp_error  # Added import
 
 # Configuration constants
 MAX_SIMULATIONS = 1_000_000  # Maximum number of simulations
@@ -72,6 +71,7 @@ LEAGUES = {
 # Global Selenium driver management
 GLOBAL_DRIVER = None
 
+
 def initialize_global_driver():
     """Initialize the global Selenium driver if it doesn't exist."""
     global GLOBAL_DRIVER
@@ -92,6 +92,7 @@ def initialize_global_driver():
             return False
     return True
 
+
 def cleanup_global_driver():
     """Close the global driver when the program ends."""
     global GLOBAL_DRIVER
@@ -102,13 +103,14 @@ def cleanup_global_driver():
             pass
         GLOBAL_DRIVER = None
 
+
 def main():
     """Main function to run the football probability simulation."""
     # Display available leagues
     print("⚽ Available leagues:")
     for idx, (_, name) in LEAGUES.items():
         print(f"{idx}. {name}")
-        
+
     # Get user league selection
     try:
         choice = int(input("Select league number: "))
@@ -151,17 +153,17 @@ def main():
         print("❌ Could not get remaining fixtures.")
         cleanup_global_driver()
         return
-        
+
     # Get home and away standings for more accurate simulation
     print("🔄 Getting home league table...")
     home_table = client.get_home_league_table(tournament_id, season_id)
     print("🔄 Getting away league table...")
     away_table = client.get_away_league_table(tournament_id, season_id)
-    
+
     # Get team colors for visualization
     print("🔄 Fetching team colors for visualization...")
     team_colors = client.get_team_colors(tournament_id, season_id)
-    
+
     # Close the Selenium driver now that all API data is fetched
     print("🔄 Closing SofaScore driver...")
     cleanup_global_driver()
@@ -178,46 +180,70 @@ def main():
         return
 
     # Run simulations
-    print(f"🔄 Running up to {MAX_SIMULATIONS} simulations (max {MAX_SIMULATION_TIME_SECONDS}s)...")
+    print(
+        f"🔄 Running up to {MAX_SIMULATIONS} simulations (max {MAX_SIMULATION_TIME_SECONDS}s)..."
+    )
     print("Press 'q' to stop the simulation early.")
     # Display maximum simulation time using reusable formatter
     max_time_str = format_duration(MAX_SIMULATION_TIME_SECONDS)
     # Updated note to include all stopping conditions
-    print(f"⏳ Note: Simulation will stop if it reaches {MAX_SIMULATIONS:,} simulations, {max_time_str}, or a PP Error of {TARGET_PP_ERROR:.3f} pp, whichever comes first.")
-    sim_count_completed = 0 # Renamed from sim_count for clarity, tracks completed simulations
-    last_error_update_time = time.time() # Initialize time for error update
+    print(
+        f"⏳ Note: Simulation will stop if it reaches {MAX_SIMULATIONS:,} simulations, {max_time_str}, or a PP Error of {TARGET_PP_ERROR:.3f} pp, whichever comes first."
+    )
+    sim_count_completed = (
+        0  # Renamed from sim_count for clarity, tracks completed simulations
+    )
+    last_error_update_time = time.time()  # Initialize time for error update
 
     # Explicitly create tqdm instance to control it
-    with tqdm(total=MAX_SIMULATIONS, desc="Simulating seasons", unit="simulation", leave=True) as pbar:
+    with tqdm(
+        total=MAX_SIMULATIONS, desc="Simulating seasons", unit="simulation", leave=True
+    ) as pbar:
         with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
             futures = []
             # Submit initial batch of simulations
-            for _ in range(min(MAX_SIMULATIONS, NUM_WORKERS * 2)): # Submit a reasonable initial batch
+            for _ in range(
+                min(MAX_SIMULATIONS, NUM_WORKERS * 2)
+            ):  # Submit a reasonable initial batch
                 if len(futures) + sim_count_completed < MAX_SIMULATIONS:
-                    futures.append(executor.submit(simulate_season, base_table, fixtures, home_table, away_table))
+                    futures.append(
+                        executor.submit(
+                            simulate_season,
+                            base_table,
+                            fixtures,
+                            home_table,
+                            away_table,
+                        )
+                    )
 
             while sim_count_completed < MAX_SIMULATIONS and futures:
                 # Check for user key press to stop simulation early
                 if msvcrt.kbhit():
                     key = msvcrt.getch()
-                    if key.lower() == b'q':
-                        tqdm.write(f"⏸ Simulation stopped by user after {sim_count_completed} simulations.")
+                    if key.lower() == b"q":
+                        tqdm.write(
+                            f"⏸ Simulation stopped by user after {sim_count_completed} simulations."
+                        )
                         # Cancel pending futures
                         for future in futures:
                             future.cancel()
-                        futures = [] # Clear the list
-                        break # Exit the loop
+                        futures = []  # Clear the list
+                        break  # Exit the loop
 
                 # Check if we've exceeded the maximum simulation time
                 if time.time() - start_time > MAX_SIMULATION_TIME_SECONDS:
-                    tqdm.write(f"⏳ Maximum simulation time reached after {sim_count_completed} simulations. Stopping early.")
+                    tqdm.write(
+                        f"⏳ Maximum simulation time reached after {sim_count_completed} simulations. Stopping early."
+                    )
                     for future in futures:
                         future.cancel()
                     futures = []
-                    break # Exit the loop
-                
+                    break  # Exit the loop
+
                 # Process completed futures
-                done_futures, not_done_futures_set = concurrent.futures.wait(futures, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED)
+                done_futures, not_done_futures_set = concurrent.futures.wait(
+                    futures, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
+                )
                 futures = list(not_done_futures_set)
 
                 for future in done_futures:
@@ -230,43 +256,68 @@ def main():
                         # Record the positions from this simulation
                         for pos, (team, _) in enumerate(simulated_results, 1):
                             position_counts[team][pos] += 1
-                        
-                        sim_count_completed += 1 # Increment after a successful simulation
-                        pbar.update(1) # Manually update the progress bar by 1
+
+                        sim_count_completed += (
+                            1  # Increment after a successful simulation
+                        )
+                        pbar.update(1)  # Manually update the progress bar by 1
 
                         # Submit a new task if we haven't reached the max
                         if len(futures) + sim_count_completed < MAX_SIMULATIONS:
-                             futures.append(executor.submit(simulate_season, base_table, fixtures, home_table, away_table))
+                            futures.append(
+                                executor.submit(
+                                    simulate_season,
+                                    base_table,
+                                    fixtures,
+                                    home_table,
+                                    away_table,
+                                )
+                            )
 
                     except Exception as e:
                         tqdm.write(f"Error in simulation thread: {e}")
-
 
                 # Update and display error every 5 seconds (based on main thread time)
                 current_time = time.time()
                 if current_time - last_error_update_time >= 5:
                     num_teams = len(position_counts)
                     if sim_count_completed > 0:
-                        pp_error = calculate_pp_error(position_counts, sim_count_completed, num_teams)
+                        pp_error = calculate_pp_error(
+                            position_counts, sim_count_completed, num_teams
+                        )
                         pbar.set_postfix_str(f"Error: {pp_error:.3f} pp")
                         if pp_error <= TARGET_PP_ERROR:
-                            tqdm.write(f"🎯 Target PP Error of {TARGET_PP_ERROR:.3f} pp reached after {sim_count_completed} simulations. Stopping early.")
-                            for future_to_cancel in futures: # Corrected variable name
+                            tqdm.write(
+                                f"🎯 Target PP Error of {TARGET_PP_ERROR:.3f} pp reached after {sim_count_completed} simulations. Stopping early."
+                            )
+                            for future_to_cancel in futures:  # Corrected variable name
                                 future_to_cancel.cancel()
                             futures = []
                             break  # Exit the inner while loop
                     last_error_update_time = current_time
-                
-                if not futures and sim_count_completed < MAX_SIMULATIONS : # if all futures are processed and we need more
+
+                if (
+                    not futures and sim_count_completed < MAX_SIMULATIONS
+                ):  # if all futures are processed and we need more
                     # Resubmit if necessary, e.g. if previous batch was small or many were cancelled
-                    for _ in range(min(MAX_SIMULATIONS - sim_count_completed, NUM_WORKERS * 2)):
+                    for _ in range(
+                        min(MAX_SIMULATIONS - sim_count_completed, NUM_WORKERS * 2)
+                    ):
                         if len(futures) + sim_count_completed < MAX_SIMULATIONS:
-                             futures.append(executor.submit(simulate_season, base_table, fixtures, home_table, away_table))
-            
+                            futures.append(
+                                executor.submit(
+                                    simulate_season,
+                                    base_table,
+                                    fixtures,
+                                    home_table,
+                                    away_table,
+                                )
+                            )
+
             # Final cleanup of any remaining futures if the loop was exited by other means
             for future in futures:
                 future.cancel()
-            
+
             # Ensure executor is properly shut down (though context manager does this)
             executor.shutdown(wait=False, cancel_futures=True)
 
@@ -282,15 +333,23 @@ def main():
     processed_colors = process_team_colors(team_colors)
 
     # Prepare a single results directory for this run organized by league, date and time
-    sanitized_league = league_name.replace(' ', '_')
-    date_str = datetime.now().strftime('%Y-%m-%d')  # YYYY-MM-DD
-    time_str = datetime.now().strftime('%H-%M-%S')  # HH-MM-SS
-    run_dir = Path('results') / sanitized_league / date_str / time_str
+    sanitized_league = league_name.replace(" ", "_")
+    date_str = datetime.now().strftime("%Y-%m-%d")  # YYYY-MM-DD
+    time_str = datetime.now().strftime("%H-%M-%S")  # HH-MM-SS
+    run_dir = Path("results") / sanitized_league / date_str / time_str
     # Print text results
     # Pass number of remaining fixtures for match count calculations
     num_fixtures = len(fixtures)
-    print_simulation_results(position_counts, num_simulations, base_table, table_counter, run_dir, elapsed_time, num_fixtures)
-    
+    print_simulation_results(
+        position_counts,
+        num_simulations,
+        base_table,
+        table_counter,
+        run_dir,
+        elapsed_time,
+        num_fixtures,
+    )
+
     # Calculate and print final PP error
     if num_simulations > 0:
         num_teams = len(position_counts)
@@ -298,11 +357,14 @@ def main():
         # Removed '%' from the print output
         print(f"📊 Final Average Percentage Point Error: {final_pp_error:.3f}")
         # Optionally, save this to the simulation.txt file
-        with open(run_dir / 'simulation.txt', 'a', encoding='utf-8') as f:
+        with open(run_dir / "simulation.txt", "a", encoding="utf-8") as f:
             # Removed '%' from the file output
             f.write(f"Final Average Percentage Point Error: {final_pp_error:.3f}\\n")
 
     # Show visualization and save image
+    visualize_results(
+        position_counts, num_simulations, processed_colors, base_table, run_dir
+    )
     visualize_results(position_counts, num_simulations, processed_colors, base_table, run_dir)
 
 
