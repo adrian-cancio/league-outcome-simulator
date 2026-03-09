@@ -4,20 +4,19 @@ This program calculates the probabilities of different final league positions
 for teams in various football leagues based on current standings and remaining fixtures.
 """
 
-import time
+import importlib.util
+import msvcrt  # Added for non-blocking key detection on Windows
 import os
-from datetime import datetime
+import sys
+import time
 from collections import Counter
+from datetime import datetime
+from pathlib import Path
+
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from tqdm import tqdm
-import sys
-import importlib.util
-from pathlib import Path
-import msvcrt  # Added for non-blocking key detection on Windows
-import concurrent.futures
-import threading
 
 # dependency check at startup
 required_packages = ["selenium", "tqdm", "pandas", "matplotlib", "numpy", "scipy"]
@@ -29,10 +28,10 @@ if missing:
 
 # Use package-relative imports
 from .data import SofaScoreClient
-from .simulation import simulate_season, simulate_bulk
-from .visualization import visualize_results, print_simulation_results
-from .utils import process_team_colors, format_duration
 from .error_estimation import calculate_pp_error  # Added import
+from .simulation import simulate_bulk
+from .utils import format_duration, process_team_colors
+from .visualization import print_simulation_results, visualize_results
 
 # Configuration constants
 MAX_SIMULATIONS = 1_000_000  # Maximum number of simulations
@@ -168,160 +167,92 @@ def main():
     print("🔄 Closing SofaScore driver...")
     cleanup_global_driver()
 
-    # Initialize counters for each team's final positions
-    position_counts = {team: Counter() for team in [row[0] for row in base_table[1:]]}
-    # Track full final table occurrences
-    table_counter = Counter()
-    start_time = time.time()
-
     # Check if there are fixtures to simulate
     if not fixtures:
         print("❌ No fixtures to simulate.")
         return
 
-    # Run simulations
+    # Initialize counters for each team's final positions
+    position_counts = {team: Counter() for team in [row[0] for row in base_table[1:]]}
+    # Track full final table occurrences (not used with bulk, but kept for compatibility)
+    table_counter = Counter()
+    start_time = time.time()
+
+    # Run simulations using optimized Rust bulk simulation
     print(
         f"🔄 Running up to {MAX_SIMULATIONS} simulations (max {MAX_SIMULATION_TIME_SECONDS}s)..."
     )
     print("Press 'q' to stop the simulation early.")
-    # Display maximum simulation time using reusable formatter
     max_time_str = format_duration(MAX_SIMULATION_TIME_SECONDS)
-    # Updated note to include all stopping conditions
     print(
         f"⏳ Note: Simulation will stop if it reaches {MAX_SIMULATIONS:,} simulations, {max_time_str}, or a PP Error of {TARGET_PP_ERROR:.3f} pp, whichever comes first."
     )
-    sim_count_completed = (
-        0  # Renamed from sim_count for clarity, tracks completed simulations
-    )
-    last_error_update_time = time.time()  # Initialize time for error update
 
-    # Explicitly create tqdm instance to control it
+    sim_count_completed = 0
+    last_error_update_time = time.time()
+
+    # Use batched bulk simulation for maximum performance
+    # Larger batches = better Rayon parallelism, but less responsive to early stopping
+    BATCH_SIZE = 50000
+
     with tqdm(
-        total=MAX_SIMULATIONS, desc="Simulating seasons", unit="simulation", leave=True
+        total=MAX_SIMULATIONS, desc="Simulating seasons", unit="sim", leave=True
     ) as pbar:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-            futures = []
-            # Submit initial batch of simulations
-            for _ in range(
-                min(MAX_SIMULATIONS, NUM_WORKERS * 2)
-            ):  # Submit a reasonable initial batch
-                if len(futures) + sim_count_completed < MAX_SIMULATIONS:
-                    futures.append(
-                        executor.submit(
-                            simulate_season,
-                            base_table,
-                            fixtures,
-                            home_table,
-                            away_table,
-                        )
-                    )
-
-            while sim_count_completed < MAX_SIMULATIONS and futures:
-                # Check for user key press to stop simulation early
-                if msvcrt.kbhit():
-                    key = msvcrt.getch()
-                    if key.lower() == b"q":
-                        tqdm.write(
-                            f"⏸ Simulation stopped by user after {sim_count_completed} simulations."
-                        )
-                        # Cancel pending futures
-                        for future in futures:
-                            future.cancel()
-                        futures = []  # Clear the list
-                        break  # Exit the loop
-
-                # Check if we've exceeded the maximum simulation time
-                if time.time() - start_time > MAX_SIMULATION_TIME_SECONDS:
+        while sim_count_completed < MAX_SIMULATIONS:
+            # Check for user key press to stop simulation early
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key.lower() == b"q":
                     tqdm.write(
-                        f"⏳ Maximum simulation time reached after {sim_count_completed} simulations. Stopping early."
+                        f"⏸ Simulation stopped by user after {sim_count_completed} simulations."
                     )
-                    for future in futures:
-                        future.cancel()
-                    futures = []
-                    break  # Exit the loop
+                    break
 
-                # Process completed futures
-                done_futures, not_done_futures_set = concurrent.futures.wait(
-                    futures, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED
+            # Check if we've exceeded the maximum simulation time
+            if time.time() - start_time > MAX_SIMULATION_TIME_SECONDS:
+                tqdm.write(
+                    f"⏳ Maximum simulation time reached after {sim_count_completed} simulations."
                 )
-                futures = list(not_done_futures_set)
+                break
 
-                for future in done_futures:
-                    if future.cancelled():
-                        continue
-                    try:
-                        simulated_results = future.result()
-                        # Record the table ordering
-                        table_counter[tuple(team for team, _ in simulated_results)] += 1
-                        # Record the positions from this simulation
-                        for pos, (team, _) in enumerate(simulated_results, 1):
-                            position_counts[team][pos] += 1
+            # Calculate batch size (don't exceed remaining simulations)
+            remaining = MAX_SIMULATIONS - sim_count_completed
+            current_batch = min(BATCH_SIZE, remaining)
 
-                        sim_count_completed += (
-                            1  # Increment after a successful simulation
+            # Run bulk simulation in Rust (uses Rayon for parallelism)
+            try:
+                bulk_results = simulate_bulk(
+                    base_table, fixtures, home_table, away_table, current_batch
+                )
+
+                # Aggregate results into position_counts
+                for team, pos_dict in bulk_results.items():
+                    for pos, count in pos_dict.items():
+                        position_counts[team][pos] += count
+
+                sim_count_completed += current_batch
+                pbar.update(current_batch)
+
+            except Exception as e:
+                tqdm.write(f"Error in bulk simulation: {e}")
+                break
+
+            # Update and display error periodically
+            current_time = time.time()
+            if current_time - last_error_update_time >= 2:
+                num_teams = len(position_counts)
+                if sim_count_completed > 0:
+                    pp_error = calculate_pp_error(
+                        position_counts, sim_count_completed, num_teams
+                    )
+                    pbar.set_postfix_str(f"Error: {pp_error:.3f} pp")
+                    if pp_error <= TARGET_PP_ERROR:
+                        tqdm.write(
+                            f"🎯 Target PP Error of {TARGET_PP_ERROR:.3f} pp reached after {sim_count_completed} simulations."
                         )
-                        pbar.update(1)  # Manually update the progress bar by 1
+                        break
+                last_error_update_time = current_time
 
-                        # Submit a new task if we haven't reached the max
-                        if len(futures) + sim_count_completed < MAX_SIMULATIONS:
-                            futures.append(
-                                executor.submit(
-                                    simulate_season,
-                                    base_table,
-                                    fixtures,
-                                    home_table,
-                                    away_table,
-                                )
-                            )
-
-                    except Exception as e:
-                        tqdm.write(f"Error in simulation thread: {e}")
-
-                # Update and display error every 5 seconds (based on main thread time)
-                current_time = time.time()
-                if current_time - last_error_update_time >= 5:
-                    num_teams = len(position_counts)
-                    if sim_count_completed > 0:
-                        pp_error = calculate_pp_error(
-                            position_counts, sim_count_completed, num_teams
-                        )
-                        pbar.set_postfix_str(f"Error: {pp_error:.3f} pp")
-                        if pp_error <= TARGET_PP_ERROR:
-                            tqdm.write(
-                                f"🎯 Target PP Error of {TARGET_PP_ERROR:.3f} pp reached after {sim_count_completed} simulations. Stopping early."
-                            )
-                            for future_to_cancel in futures:  # Corrected variable name
-                                future_to_cancel.cancel()
-                            futures = []
-                            break  # Exit the inner while loop
-                    last_error_update_time = current_time
-
-                if (
-                    not futures and sim_count_completed < MAX_SIMULATIONS
-                ):  # if all futures are processed and we need more
-                    # Resubmit if necessary, e.g. if previous batch was small or many were cancelled
-                    for _ in range(
-                        min(MAX_SIMULATIONS - sim_count_completed, NUM_WORKERS * 2)
-                    ):
-                        if len(futures) + sim_count_completed < MAX_SIMULATIONS:
-                            futures.append(
-                                executor.submit(
-                                    simulate_season,
-                                    base_table,
-                                    fixtures,
-                                    home_table,
-                                    away_table,
-                                )
-                            )
-
-            # Final cleanup of any remaining futures if the loop was exited by other means
-            for future in futures:
-                future.cancel()
-
-            # Ensure executor is properly shut down (though context manager does this)
-            executor.shutdown(wait=False, cancel_futures=True)
-
-    # num_simulations will now be the accurately tracked sim_count_completed
     num_simulations = sim_count_completed
     print(f"✅ Completed {num_simulations} simulations")
 
@@ -365,7 +296,9 @@ def main():
     visualize_results(
         position_counts, num_simulations, processed_colors, base_table, run_dir
     )
-    visualize_results(position_counts, num_simulations, processed_colors, base_table, run_dir)
+    visualize_results(
+        position_counts, num_simulations, processed_colors, base_table, run_dir
+    )
 
 
 if __name__ == "__main__":

@@ -379,7 +379,7 @@ fn simulate_season(
 }
 
 /// Batch simulate many seasons in parallel and return position counts per team
-/// Now uses home_table and away_table for accurate lambda calculation (same as simulate_season)
+/// OPTIMIZED VERSION: Uses indices instead of strings, precalculates lambdas, uses Vec instead of HashMap
 #[pyfunction]
 fn simulate_bulk(
     py: Python,
@@ -395,30 +395,7 @@ fn simulate_bulk(
     let home_list: &PyList = home_table.extract(py)?;
     let away_list: &PyList = away_table.extract(py)?;
 
-    // Parse fixtures into a vec of (home_team, away_team)
-    let fixtures_vec: Vec<(String, String)> = fixtures_list
-        .iter()
-        .map(|item| {
-            let d: &PyDict = item.extract().unwrap();
-            let h: &PyDict = d.get_item("h").unwrap().downcast().unwrap();
-            let a: &PyDict = d.get_item("a").unwrap().downcast().unwrap();
-            (
-                h.get_item("title").unwrap().extract().unwrap(),
-                a.get_item("title").unwrap().extract().unwrap(),
-            )
-        })
-        .collect();
-
-    // Team stats struct for bulk simulation (pts, gf, ga, m)
-    #[derive(Debug, Clone)]
-    struct BulkStats {
-        pts: i64,
-        gf: i64,
-        ga: i64,
-        m: i64,
-    }
-
-    // Get team names and initial stats from base_table
+    // Get team names and create index mapping (String -> usize)
     let teams: Vec<String> = base
         .iter()
         .skip(1)
@@ -428,53 +405,56 @@ fn simulate_bulk(
         })
         .collect();
 
-    let initial_stats: HashMap<String, BulkStats> = base
+    let num_teams = teams.len();
+    let team_to_idx: HashMap<String, usize> = teams
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.clone(), i))
+        .collect();
+
+    // Initial stats as Vec indexed by team index: [pts, gf, ga, m]
+    let initial_stats: Vec<[i64; 4]> = base
         .iter()
         .skip(1)
         .map(|row| {
             let row_list: &PyList = row.extract().unwrap();
-            let team: String = row_list.get_item(0).unwrap().extract().unwrap();
             let m: i64 = row_list.get_item(1).unwrap().extract().unwrap();
             let gf: i64 = row_list.get_item(5).unwrap().extract().unwrap();
             let ga: i64 = row_list.get_item(6).unwrap().extract().unwrap();
             let pts: i64 = row_list.get_item(7).unwrap().extract().unwrap();
-            (team, BulkStats { pts, gf, ga, m })
+            [pts, gf, ga, m]
         })
         .collect();
 
-    // Parse home_stats from home_list (gf, ga, m)
-    let home_stats_map: HashMap<String, (i64, i64, i64)> = home_list
-        .iter()
-        .skip(1)
-        .map(|row| {
-            let row_list: &PyList = row.extract().unwrap();
-            let team: String = row_list.get_item(0).unwrap().extract().unwrap();
-            let m: i64 = row_list.get_item(1).unwrap().extract().unwrap();
-            let gf: i64 = row_list.get_item(5).unwrap().extract().unwrap();
-            let ga: i64 = row_list.get_item(6).unwrap().extract().unwrap();
-            (team, (gf, ga, m))
-        })
-        .collect();
+    // Parse home_stats: index -> (gf, ga, m)
+    let mut home_stats: Vec<(i64, i64, i64)> = vec![(0, 0, 0); num_teams];
+    for row in home_list.iter().skip(1) {
+        let row_list: &PyList = row.extract()?;
+        let team: String = row_list.get_item(0)?.extract()?;
+        if let Some(&idx) = team_to_idx.get(&team) {
+            let m: i64 = row_list.get_item(1)?.extract()?;
+            let gf: i64 = row_list.get_item(5)?.extract()?;
+            let ga: i64 = row_list.get_item(6)?.extract()?;
+            home_stats[idx] = (gf, ga, m);
+        }
+    }
 
-    // Parse away_stats from away_list (gf, ga, m)
-    let away_stats_map: HashMap<String, (i64, i64, i64)> = away_list
-        .iter()
-        .skip(1)
-        .map(|row| {
-            let row_list: &PyList = row.extract().unwrap();
-            let team: String = row_list.get_item(0).unwrap().extract().unwrap();
-            let m: i64 = row_list.get_item(1).unwrap().extract().unwrap();
-            let gf: i64 = row_list.get_item(5).unwrap().extract().unwrap();
-            let ga: i64 = row_list.get_item(6).unwrap().extract().unwrap();
-            (team, (gf, ga, m))
-        })
-        .collect();
-
-    let num_teams = teams.len();
+    // Parse away_stats: index -> (gf, ga, m)
+    let mut away_stats: Vec<(i64, i64, i64)> = vec![(0, 0, 0); num_teams];
+    for row in away_list.iter().skip(1) {
+        let row_list: &PyList = row.extract()?;
+        let team: String = row_list.get_item(0)?.extract()?;
+        if let Some(&idx) = team_to_idx.get(&team) {
+            let m: i64 = row_list.get_item(1)?.extract()?;
+            let gf: i64 = row_list.get_item(5)?.extract()?;
+            let ga: i64 = row_list.get_item(6)?.extract()?;
+            away_stats[idx] = (gf, ga, m);
+        }
+    }
 
     // Calculate league average goals per team per match
-    let total_gf: i64 = initial_stats.values().map(|s| s.gf).sum();
-    let total_matches: i64 = initial_stats.values().map(|s| s.m).sum();
+    let total_gf: i64 = initial_stats.iter().map(|s| s[1]).sum();
+    let total_matches: i64 = initial_stats.iter().map(|s| s[3]).sum();
     let avg_league_goals = if total_matches > 0 {
         total_gf as f64 / total_matches as f64
     } else {
@@ -482,118 +462,160 @@ fn simulate_bulk(
     };
 
     // Calculate dynamic home advantage from actual data
-    let home_total_gf: i64 = home_stats_map.values().map(|(gf, _, _)| gf).sum();
-    let away_total_gf: i64 = away_stats_map.values().map(|(gf, _, _)| gf).sum();
+    let home_total_gf: i64 = home_stats.iter().map(|(gf, _, _)| gf).sum();
+    let away_total_gf: i64 = away_stats.iter().map(|(gf, _, _)| gf).sum();
     let home_advantage = if away_total_gf > 0 {
         (home_total_gf as f64 / away_total_gf as f64).clamp(1.0, 1.5)
     } else {
         HOME_ADVANTAGE
     };
 
-    // Parallel batch simulations using Dixon-Coles for each match
-    let counts: HashMap<String, Vec<u64>> = (0..n_sims)
+    // OPTIMIZATION: Precalculate attack/defense strengths for all teams
+    // home_attack[i], home_defense[i] for team i when playing at home
+    // away_attack[i], away_defense[i] for team i when playing away
+    let mut home_attack: Vec<f64> = vec![1.0; num_teams];
+    let mut home_defense: Vec<f64> = vec![1.0; num_teams];
+    let mut away_attack: Vec<f64> = vec![1.0; num_teams];
+    let mut away_defense: Vec<f64> = vec![1.0; num_teams];
+
+    for i in 0..num_teams {
+        let (hgf, hga, hm) = home_stats[i];
+        if hm > 0 && avg_league_goals > 0.0 {
+            home_attack[i] = (hgf as f64 / hm as f64) / avg_league_goals;
+            home_defense[i] = (hga as f64 / hm as f64) / avg_league_goals;
+        }
+        let (agf, aga, am) = away_stats[i];
+        if am > 0 && avg_league_goals > 0.0 {
+            away_attack[i] = (agf as f64 / am as f64) / avg_league_goals;
+            away_defense[i] = (aga as f64 / am as f64) / avg_league_goals;
+        }
+    }
+
+    // OPTIMIZATION: Parse fixtures as indices and precalculate lambdas
+    // Each fixture: (home_idx, away_idx, lambda_h, lambda_a)
+    let fixtures_with_lambdas: Vec<(usize, usize, f64, f64)> = fixtures_list
+        .iter()
+        .filter_map(|item| {
+            let d: &PyDict = item.extract().ok()?;
+            let h: &PyDict = d.get_item("h")?.downcast().ok()?;
+            let a: &PyDict = d.get_item("a")?.downcast().ok()?;
+            let h_name: String = h.get_item("title")?.extract().ok()?;
+            let a_name: String = a.get_item("title")?.extract().ok()?;
+            let h_idx = *team_to_idx.get(&h_name)?;
+            let a_idx = *team_to_idx.get(&a_name)?;
+
+            // Precalculate lambdas for this fixture
+            let lambda_h =
+                avg_league_goals * home_attack[h_idx] * away_defense[a_idx] * home_advantage;
+            let lambda_a = avg_league_goals * away_attack[a_idx] * home_defense[h_idx];
+
+            Some((h_idx, a_idx, lambda_h, lambda_a))
+        })
+        .collect();
+
+    // OPTIMIZATION: Use simple Poisson sampling directly (no mutex, no cache)
+    // This is faster for unique lambda values that rarely repeat
+    #[inline(always)]
+    fn sample_poisson<R: Rng>(rng: &mut R, lambda: f64) -> i64 {
+        if lambda <= 0.0 {
+            return 0;
+        }
+        // For small lambda, use inverse transform
+        if lambda < 30.0 {
+            let l = (-lambda).exp();
+            let mut k: i64 = 0;
+            let mut p: f64 = 1.0;
+            loop {
+                k += 1;
+                p *= rng.gen::<f64>();
+                if p <= l {
+                    return k - 1;
+                }
+            }
+        } else {
+            // For large lambda, use normal approximation
+            let normal: f64 = rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                + rng.gen::<f64>()
+                - 6.0;
+            (lambda + normal * lambda.sqrt()).round().max(0.0) as i64
+        }
+    }
+
+    // Parallel batch simulations
+    let counts: Vec<Vec<u64>> = (0..n_sims)
         .into_par_iter()
         .map_init(
             || ChaCha8Rng::from_entropy(),
             |rng, _| {
-                // simulate one season - clone initial stats
-                let mut standings: HashMap<String, BulkStats> = initial_stats.clone();
+                // OPTIMIZATION: Use Vec instead of HashMap for standings
+                // Each element: [pts, gf, ga, m]
+                let mut standings: Vec<[i64; 4]> = initial_stats.clone();
 
-                for (h_team, a_team) in &fixtures_vec {
-                    // Attack/Defense model: lambda considers both team's attack AND opponent's defense
-                    // Get home team's attack and defense strength
-                    let (home_gf, home_ga, home_m) =
-                        home_stats_map.get(h_team).copied().unwrap_or((0, 0, 0));
-                    let attack_h = if home_m > 0 && avg_league_goals > 0.0 {
-                        (home_gf as f64 / home_m as f64) / avg_league_goals
-                    } else {
-                        1.0
-                    };
-                    let defense_h = if home_m > 0 && avg_league_goals > 0.0 {
-                        (home_ga as f64 / home_m as f64) / avg_league_goals
-                    } else {
-                        1.0
-                    };
-
-                    // Get away team's attack and defense strength
-                    let (away_gf, away_ga, away_m) =
-                        away_stats_map.get(a_team).copied().unwrap_or((0, 0, 0));
-                    let attack_a = if away_m > 0 && avg_league_goals > 0.0 {
-                        (away_gf as f64 / away_m as f64) / avg_league_goals
-                    } else {
-                        1.0
-                    };
-                    let defense_a = if away_m > 0 && avg_league_goals > 0.0 {
-                        (away_ga as f64 / away_m as f64) / avg_league_goals
-                    } else {
-                        1.0
-                    };
-
-                    // Calculate lambdas using attack/defense model
-                    let lambda_h = avg_league_goals * attack_h * defense_a * home_advantage;
-                    let lambda_a = avg_league_goals * attack_a * defense_h;
-
-                    // Simulate the match
-                    let (gh, ga) = FootballSimulation::simulate_match(rng, lambda_h, lambda_a);
+                for &(h_idx, a_idx, lambda_h, lambda_a) in &fixtures_with_lambdas {
+                    // Sample goals using fast Poisson
+                    let gh = sample_poisson(rng, lambda_h);
+                    let ga = sample_poisson(rng, lambda_a);
 
                     // Update home team stats
-                    if let Some(sh_mut) = standings.get_mut(h_team) {
-                        sh_mut.gf += gh;
-                        sh_mut.ga += ga;
-                        sh_mut.m += 1;
-                        if gh > ga {
-                            sh_mut.pts += 3;
-                        } else if gh == ga {
-                            sh_mut.pts += 1;
-                        }
+                    standings[h_idx][1] += gh; // gf
+                    standings[h_idx][2] += ga; // ga
+                    standings[h_idx][3] += 1; // m
+                    if gh > ga {
+                        standings[h_idx][0] += 3; // pts
+                    } else if gh == ga {
+                        standings[h_idx][0] += 1;
                     }
 
                     // Update away team stats
-                    if let Some(sa_mut) = standings.get_mut(a_team) {
-                        sa_mut.gf += ga;
-                        sa_mut.ga += gh;
-                        sa_mut.m += 1;
-                        if ga > gh {
-                            sa_mut.pts += 3;
-                        } else if gh == ga {
-                            sa_mut.pts += 1;
-                        }
+                    standings[a_idx][1] += ga; // gf
+                    standings[a_idx][2] += gh; // ga
+                    standings[a_idx][3] += 1; // m
+                    if ga > gh {
+                        standings[a_idx][0] += 3; // pts
+                    } else if ga == gh {
+                        standings[a_idx][0] += 1;
                     }
                 }
 
-                // Determine final order (same sorting as simulate_season)
-                let mut order: Vec<(String, BulkStats)> = standings.into_iter().collect();
-                order.sort_by(|a, b| {
-                    b.1.pts
-                        .cmp(&a.1.pts)
-                        .then((b.1.gf - b.1.ga).cmp(&(a.1.gf - a.1.ga)))
-                        .then(b.1.gf.cmp(&a.1.gf))
+                // Create indices and sort by standings
+                let mut indices: Vec<usize> = (0..num_teams).collect();
+                indices.sort_by(|&a, &b| {
+                    let sa = &standings[a];
+                    let sb = &standings[b];
+                    sb[0]
+                        .cmp(&sa[0]) // pts desc
+                        .then((sb[1] - sb[2]).cmp(&(sa[1] - sa[2]))) // gd desc
+                        .then(sb[1].cmp(&sa[1])) // gf desc
                 });
 
-                order.into_iter().map(|x| x.0).collect::<Vec<_>>()
+                indices
             },
         )
         .fold(
-            || HashMap::new(),
-            |mut acc: HashMap<String, Vec<u64>>, order| {
-                for (pos, team) in order.iter().enumerate() {
-                    let entry = acc
-                        .entry(team.clone())
-                        .or_insert_with(|| vec![0u64; num_teams]);
-                    entry[pos] += 1;
+            || vec![vec![0u64; num_teams]; num_teams],
+            |mut acc, order| {
+                for (pos, &team_idx) in order.iter().enumerate() {
+                    acc[team_idx][pos] += 1;
                 }
                 acc
             },
         )
         .reduce(
-            || HashMap::new(),
+            || vec![vec![0u64; num_teams]; num_teams],
             |mut a, b| {
-                for (team, vec_b) in b {
-                    let entry = a
-                        .entry(team.clone())
-                        .or_insert_with(|| vec![0u64; num_teams]);
-                    for i in 0..vec_b.len() {
-                        entry[i] += vec_b[i];
+                for i in 0..num_teams {
+                    for j in 0..num_teams {
+                        a[i][j] += b[i][j];
                     }
                 }
                 a
@@ -602,12 +624,12 @@ fn simulate_bulk(
 
     // Build Python dict: team -> dict(position->count)
     let py_dict = PyDict::new(py);
-    for (team, vec) in counts {
+    for (team_idx, team_name) in teams.iter().enumerate() {
         let inner = PyDict::new(py);
-        for (i, count) in vec.into_iter().enumerate() {
-            inner.set_item(i + 1, count)?;
+        for (pos, &count) in counts[team_idx].iter().enumerate() {
+            inner.set_item(pos + 1, count)?;
         }
-        py_dict.set_item(team, inner)?;
+        py_dict.set_item(team_name, inner)?;
     }
     Ok(py_dict.into())
 }
