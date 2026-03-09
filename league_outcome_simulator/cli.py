@@ -80,7 +80,11 @@ def initialize_global_driver():
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--log-level=3")
+        chrome_options.add_argument("--disable-logging")
+        chrome_options.add_argument("--disable-usb-keyboard-detect")
         chrome_options.add_argument("user-agent=Mozilla/5.0")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
         service = Service(log_path="nul")
         try:
             GLOBAL_DRIVER = webdriver.Chrome(service=service, options=chrome_options)
@@ -293,12 +297,10 @@ def main():
             f.write(f"Final Average Percentage Point Error: {final_pp_error:.3f}\\n")
 
     # Show visualization and save image
-    visualize_results(
-        position_counts, num_simulations, processed_colors, base_table, run_dir
-    )
-    visualize_results(
-        position_counts, num_simulations, processed_colors, base_table, run_dir
-    )
+    if num_simulations > 0:
+        visualize_results(
+            position_counts, num_simulations, processed_colors, base_table, run_dir
+        )
 
 
 if __name__ == "__main__":

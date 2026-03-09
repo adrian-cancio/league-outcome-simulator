@@ -1,5 +1,6 @@
 import time
 import json
+from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -29,7 +30,11 @@ class SofaScoreClient:
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--log-level=3")
+        chrome_options.add_argument("--disable-logging")
+        chrome_options.add_argument("--disable-usb-keyboard-detect")
         chrome_options.add_argument("user-agent=Mozilla/5.0")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
         service = Service(log_path="nul")
         try:
             self.driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -62,13 +67,33 @@ class SofaScoreClient:
             return None
 
     def get_current_season_id(self, tournament_id):
-        """Get the current season ID for a tournament."""
+        """Get the current season ID for a tournament.
+
+        Matches the season year field (e.g. '25/26') to the current date.
+        Football seasons typically span Aug-May, so Jan-Jul belongs to the
+        season that started the previous calendar year.
+        """
         url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/seasons"
         data = self.fetch_json(url)
-        if data and 'seasons' in data:
-            seasons = sorted(data['seasons'], key=lambda x: x['id'], reverse=True)
-            return seasons[0]['id'] if seasons else None
-        return None
+        if not data or 'seasons' not in data or not data['seasons']:
+            return None
+
+        seasons = data['seasons']
+        now = datetime.now()
+        # For Jan-Jul, the season started the previous year; for Aug-Dec, it starts this year
+        start_year = now.year if now.month >= 8 else now.year - 1
+        # Build the expected year strings: "25/26" or just "2025" style
+        short_year = f"{start_year % 100}/{(start_year + 1) % 100}"
+        full_year = str(start_year)
+
+        for season in seasons:
+            year = season.get('year', '')
+            if year == short_year or year == full_year:
+                return season['id']
+
+        # Fallback: pick the season with the highest id that actually has fixtures
+        seasons_sorted = sorted(seasons, key=lambda x: x['id'], reverse=True)
+        return seasons_sorted[0]['id'] if seasons_sorted else None
         
     def get_league_table(self, tournament_id, season_id):
         """
@@ -187,7 +212,7 @@ class SofaScoreClient:
         all_fixtures = []
         page = 0
         
-        print(f"📅 Fetching remaining fixtures (pagination enabled)...")
+        print("📅 Fetching remaining fixtures (pagination enabled)...")
         
         while True:
             url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/events/next/{page}"
@@ -261,5 +286,5 @@ class SofaScoreClient:
             try:
                 self.driver.quit()
                 self.driver = None
-            except:
+            except Exception:
                 pass

@@ -11,33 +11,54 @@ from pathlib import Path
 
 def _ensure_rust_extension():
     """
-    Compile the Rust extension if it's missing or if source files are newer than the compiled artifact.
+    Compile and install the Rust extension if it's missing or if source files
+    are newer than the installed artifact.  Uses ``maturin develop --release``
+    so the built module is placed directly into the active virtualenv.
     """
     project_root = Path(__file__).resolve().parent.parent
+
+    # Look for the installed module in site-packages (where Python actually loads it)
+    import sysconfig
+    site_dir = Path(sysconfig.get_path("purelib"))
+    pkg_dir = site_dir / "league_outcome_simulator_rust"
+    installed_files = list(pkg_dir.glob("*.pyd")) + list(pkg_dir.glob("*.so"))
+
+    # Also check target/release for cargo-only builds (legacy fallback)
     ext_dir = project_root / "target" / "release"
-    # Pattern for the Rust Python extension on Windows (pyd) or other platforms (.so)
-    patterns = [
+    target_patterns = [
         str(ext_dir / "league_outcome_simulator_rust*.pyd"),
+        str(ext_dir / "league_outcome_simulator_rust*.dll"),
         str(ext_dir / "libleague_outcome_simulator_rust*.so"),
     ]
-    ext_files = []
-    for pattern in patterns:
-        ext_files.extend(glob.glob(pattern))
+    target_files = []
+    for pattern in target_patterns:
+        target_files.extend(glob.glob(pattern))
+
+    all_ext_files = installed_files + [Path(f) for f in target_files]
+
     # Rust source files
     rs_files = list((project_root / "src").glob("*.rs"))
     needs_build = False
-    if not ext_files:
+    if not all_ext_files:
         needs_build = True
     else:
-        ext_mtime = max(os.path.getmtime(f) for f in ext_files)
+        ext_mtime = max(os.path.getmtime(str(f)) for f in all_ext_files)
         src_mtime = max(f.stat().st_mtime for f in rs_files) if rs_files else 0
         if src_mtime > ext_mtime:
             needs_build = True
     if needs_build:
         print("🔨 Compiling Rust extension...")
+        env = os.environ.copy()
+        # Ensure VIRTUAL_ENV is set so maturin can find the venv
+        if "VIRTUAL_ENV" not in env:
+            venv_dir = Path(sys.prefix)
+            if venv_dir != Path(sys.base_prefix):
+                env["VIRTUAL_ENV"] = str(venv_dir)
         try:
             subprocess.check_call(
-                ["cargo", "build", "--release"], cwd=str(project_root)
+                [sys.executable, "-m", "maturin", "develop", "--release"],
+                cwd=str(project_root),
+                env=env,
             )
         except subprocess.CalledProcessError as e:
             print("❌ Failed to compile Rust extension:", e)
