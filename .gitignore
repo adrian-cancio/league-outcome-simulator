@@ -7,3 +7,6 @@ rust_sim*.{so,pyd,dll}
 .cache/
 .pytest_cache/
 *.pyc
+league_outcome_simulator/_rust*.pyd
+league_outcome_simulator/_rust*.so
+league_outcome_simulator/_rust*.dll
