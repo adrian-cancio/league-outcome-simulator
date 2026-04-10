@@ -1,11 +1,6 @@
-selenium
-
-tqdm
-
-pandas
-
-matplotlib
-
-numpy
-
-scipy
+curl-cffi>=0.15.0
+matplotlib>=3.8
+numpy>=1.26
+pandas>=2.2
+scipy>=1.13
+tqdm>=4.66

@@ -1,524 +1,363 @@
-"""
-Visualization module for football probability simulations.
-"""
-import pandas as pd
-import matplotlib.pyplot as plt
+"""Visualization and text rendering for simulation outputs."""
+
+from __future__ import annotations
+
 from collections import Counter
-from .utils import (
-    get_color_luminance,
-    are_colors_similar,
-    darken_color,
-    deterministic_hex_color,
-    deterministic_secondary_color,
-    get_contrasting_text_color,
-    is_good_contrast,
-    process_team_colors,
-    format_duration
-)
-import os
-from datetime import datetime
 from pathlib import Path
 
-# Number of top probable full tables to display and analyze
+from .utils import (
+    are_colors_similar,
+    darken_color,
+    format_duration,
+    get_contrasting_text_color,
+    process_team_colors,
+    team_stats_from_table,
+)
+
+
 NUM_TOP_TABLES = 10
+HATCH_PATTERNS = [
+    "////",
+    "....",
+    "xxxx",
+    "oooo",
+    "||||",
+    "++++",
+    "\\\\",
+    "----",
+    "****",
+    "xx..",
+    "++..",
+    "\\..",
+    "//..",
+    "||..",
+    "oo..",
+    "x+x+",
+    "/-/",
+    "|x|x",
+    "o-o-",
+    "*/*/",
+    "//\\",
+    "xxoo",
+    "++**",
+    "||||||||",
+    "++\\",
+    "xx||",
+    "oo--",
+    "**xx",
+    "..||",
+    "oo\\",
+]
+MEDIUM_HATCH_PATTERNS = [
+    "//",
+    "xx",
+    "++",
+    "||",
+    "..",
+    "\\\\",
+    "oo",
+    "**",
+    "//..",
+    "xx..",
+    "++..",
+    "||..",
+    "oo..",
+    "\\..",
+]
 
-def visualize_results(position_counts, num_simulations, team_colors, base_table, run_dir):
-    """
-    Visualize the simulation results with a stacked bar chart.
-    
-    Args:
-        position_counts: Dictionary mapping team names to Counter objects with position frequencies
-        num_simulations: Total number of simulations performed
-        team_colors: Dictionary mapping team names to primary/secondary colors
-        base_table: Current league standings table
-    """
-    print("📊 Showing results in chart...")
-    
-    # Process team colors to fill in any missing values
-    team_colors = process_team_colors(team_colors)
-    
-    # Calculate total matches in a season
-    total_teams = len([row for row in base_table if row[0] != 'Team'])  # Count all rows except header
-    total_matches = (total_teams - 1) * 2  # Each team plays against all others twice
-    
-    # Create dictionaries from base_table
-    current_positions = {}
-    current_points = {}
-    current_matches = {}  # Track matches played
-    for i, row in enumerate(base_table[1:], 1):  # Skip header row
-        team_name = row[0]
-        current_positions[team_name] = i
-        current_points[team_name] = int(row[7])  # Points are at index 7
-        current_matches[team_name] = int(row[1])  # Matches are at index 1
-    
-    # Create the data for visualization
-    data = []
-    for team, pos_counter in position_counts.items():
-        for pos, count in pos_counter.items():
-            data.append({"Team": team, "Position": pos, "Probability": count / num_simulations * 100})
-    df = pd.DataFrame(data)
-    
-    # Define hatching patterns and subtle patterns
-    hatch_patterns = [
-        '////', '....', 'xxxx', 'oooo', '||||', '++++', '\\\\\\\\', '----', '****',
-        'xx..', '++..', '\\\\..', '//..', '||..', 'oo..',          # Combined patterns
-        'x+x+', '\\/\\/\/', '|x|x', 'o-o-', '*/*/',                # Alternating patterns
-        '//\\\\', 'xxoo', '++**', '||||||||',                      # Dense patterns
-        '++\\\\', 'xx||', 'oo--', '**xx', '..||', 'oo\\\\',        # More combinations
-        '///\\\\\\', '...---', 'xxx|||', 'ooo+++'                  # High contrast patterns
-    ]
-    
-    subtle_patterns = [
-        '.', '/', 'x', '+', '|', '-', '\\', '*',                  # Simple patterns
-        '..', '//', 'xx', '++', '||', '--', '\\\\', '**', 'oo',   # Double density
-        '.-.', '/-/', 'x-x', '+-+', '|-|', '-.-', '\\-\\',        # Alternate with dashes
-        './.', '/./', 'x/x', '+/+', '|/|', '-/-', '\\/\\',        # Alternate with slashes
-        '...', '///', 'xxx', '+++', '|||'                         # Triple density
-    ]
-    
-    # Function to get consistent pattern index from team name
-    def get_pattern_index(team_name, pattern_list):
-        # Use a hash of the team name to get a consistent index
-        # This ensures the same team always gets the same pattern
-        name_hash = sum(ord(c) for c in team_name)
-        return name_hash % len(pattern_list)
 
-    # Create the figure
-    fig, ax = plt.subplots(figsize=(14, 8))
-    
-    # Keep track of which teams have been added to the plot
-    all_teams = list(position_counts.keys())
-    team_patches = {}  # To store handles for each team for the legend
-    
-    # Process each position individually
-    positions = sorted(df['Position'].unique())
-    
-    # First pass: Draw all bars and prepare data for labels
-    team_labels = []  # List to store pending label information
-    for position in positions:
-        # Filter data only for this position
-        position_data = df[df['Position'] == position]
-        
-        # Group and calculate probabilities
-        prob_by_team = position_data.groupby('Team')['Probability'].sum().reset_index()
-        # Add current league position to data for sorting
-        prob_by_team['CurrentPosition'] = prob_by_team['Team'].apply(
-            lambda team: current_positions.get(team, 999)
+def _pick_hatch(team: str, patterns: list[str], recent_hatches: set[str]) -> str:
+    """Pick a deterministic hatch while avoiding recent collisions."""
+    start_index = sum((index + 1) * ord(char) for index, char in enumerate(team)) % len(
+        patterns
+    )
+    step = 7 if len(patterns) > 7 else 3
+    for offset in range(len(patterns)):
+        hatch = patterns[(start_index + offset * step) % len(patterns)]
+        if hatch not in recent_hatches:
+            return hatch
+    return patterns[start_index]
+
+
+def _build_team_styles(
+    ordered_teams: list[str], team_colors: dict[str, dict[str, str]]
+) -> dict[str, dict[str, str]]:
+    """Assign visually distinct styles, prioritizing nearby teams in the table."""
+    styles: dict[str, dict[str, str]] = {}
+    recent_hatches: list[str] = []
+    recent_primary_colors: list[str] = []
+    large_league = len(ordered_teams) >= 18
+
+    for team in ordered_teams:
+        colors = team_colors.get(team, {"primary": "#4472C4", "secondary": "#1F3A6D"})
+        primary = colors.get("primary", "#4472C4")
+        secondary = colors.get("secondary", primary)
+        similar_pair = secondary == primary or are_colors_similar(
+            primary, secondary, threshold=55
         )
-        
-        # Sort by probability (ascending) for this specific position
-        prob_by_team = prob_by_team.sort_values('Probability', ascending=True)
-        
-        # Initialize base for this position's segments
-        bottom = 0
-        x_pos = position  # Center bars exactly at the integer position
-        width = 0.8  # Bar width
-        segments_to_highlight = []
-        # Variable to store the team with highest probability for this position
-        top_team = None
-        top_prob = 0
-        
-        # For each team in order (by probability), draw its segment
-        for _, row in prob_by_team.iterrows():
-            team = row['Team']
-            prob = row['Probability']
-            # Save team with highest probability
-            if prob > top_prob:
-                top_prob = prob
-                top_team = team
-                
-            # Get team colors
-            primary = team_colors[team]["primary"]
-            secondary = team_colors[team]["secondary"]
-            fill_color = primary
-            
-            # Determine the pattern based on whether colors are the same or different
-            if secondary != primary:
-                pattern_idx = get_pattern_index(team, hatch_patterns)
-                hatch = hatch_patterns[pattern_idx]
-                edge_color = secondary
-            else:
-                pattern_idx = get_pattern_index(team, subtle_patterns)
-                hatch = subtle_patterns[pattern_idx]
-                edge_color = darken_color(primary, factor=0.5)
-            
-            # Draw this segment
-            rect = ax.bar(x_pos, prob, width=width, bottom=bottom, color=fill_color, 
-                          edgecolor=edge_color, linewidth=1.5, label="")
-            rect[0].set_hatch(hatch)
-            
-            # Save this rectangle for the legend if we don't have it yet
-            if team not in team_patches:
-                team_patches[team] = rect[0]
-            
-            # Save segment information
-            segments_to_highlight.append((rect[0], bottom, prob, team))
-            
-            # Update base for next segment
-            bottom += prob
-        
-        # Store top team info for second pass
-        if top_team and top_prob >= 5.0:
-            # Find segment data for this team
-            for segment, bottom_pos, height, team_name in segments_to_highlight:
-                if team_name == top_team:
-                    # Group all information we'll need for labeling
-                    team_labels.append({
-                        'team': team_name,
-                        'position': position,
-                        'top_y': bottom_pos + height,  # Top Y position of the bar
-                        'probability': height,
-                        'primary_color': team_colors[team_name]['primary'],
-                        'secondary_color': team_colors[team_name]['secondary'],
-                    })
-        
-        # Show percentages inside bars with sufficient height
-        for segment, bottom_pos, height, team_name in segments_to_highlight:
-            if height < 2.0:  # Minimum size to show percentage
-                continue
-                
-            # Calculate central position of segment
-            center_x = x_pos
-            center_y = bottom_pos + height / 2
-            
-            # Get team colors
-            team_primary = team_colors[team_name]["primary"]
-            team_secondary = team_colors[team_name]["secondary"]
-            
-            # Check color properties
-            is_very_light_primary = get_color_luminance(team_primary) > 200
-            is_very_light_secondary = get_color_luminance(team_secondary) > 200
-            colors_identical = team_primary == team_secondary
-            colors_similar = are_colors_similar(team_primary, team_secondary, 40) if not colors_identical else True
-            is_large_bar = height >= 5.0
+        similar_to_recent = any(
+            are_colors_similar(primary, recent, threshold=85)
+            for recent in recent_primary_colors[-3:]
+        )
 
-            # Adjust for specific cases with identical or very similar colors
-            if colors_identical:
-                # If colors are identical, use automatic contrast
-                bg_color = team_primary
-                text_color = get_contrasting_text_color(bg_color)
-                edge_color = 'black' if is_very_light_primary else 'white'
-                edge_width = 1.0
-            elif colors_similar:
-                # If they are similar but not identical, adjust for contrast
-                bg_color = team_secondary
-                text_color = get_contrasting_text_color(bg_color)
-                edge_color = 'black' if is_very_light_secondary else 'white'
-                edge_width = 1.0
-            else:
-                # If they have good contrast between them
-                text_color = team_primary
-                bg_color = team_secondary
-                edge_color = 'none'
-                edge_width = 0
-            
-            # Define percentage text
-            percent_text = f"{height:.1f}%"
-            
-            # For large or medium bars, add percentage with more visible text
-            if is_large_bar:
-                # Larger size for large bars
-                font_size = min(8, max(6, height / 2))
-                ax.text(center_x, center_y, percent_text, 
-                        ha='center', va='center', fontsize=font_size, fontweight='bold',
-                        color=text_color, 
-                        bbox=dict(facecolor=bg_color, edgecolor=edge_color,
-                                alpha=0.85, pad=0.2, boxstyle='round,pad=0.2,rounding_size=0.2', 
-                                linewidth=edge_width))
-            else:
-                # For smaller bars, adaptable size but not too small
-                compact_font_size = min(7, max(5.5, height / 2))
-                ax.text(center_x, center_y, percent_text, 
-                        ha='center', va='center', fontsize=compact_font_size, fontweight='bold',
-                        color=text_color,
-                        bbox=dict(facecolor=bg_color, edgecolor=edge_color,
-                                alpha=0.85, pad=0.15, boxstyle='round,pad=0.15,rounding_size=0.1', 
-                                linewidth=edge_width))
+        use_strong_pattern = large_league or similar_pair or similar_to_recent
+        pattern_bank = HATCH_PATTERNS if use_strong_pattern else MEDIUM_HATCH_PATTERNS
+        hatch = _pick_hatch(team, pattern_bank, set(recent_hatches[-3:]))
 
-    # Create dictionary to keep only ONE team per position (the one with highest probability)
-    top_team_by_position = {}
-    for label_info in team_labels:
-        position = label_info['position']
-        
-        # Only save the team with highest probability for each position
-        if position in top_team_by_position:
-            if label_info['probability'] > top_team_by_position[position]['probability']:
-                top_team_by_position[position] = label_info
+        if similar_pair:
+            edge_color = get_contrasting_text_color(primary)
+            if edge_color == "#FFFFFF" and are_colors_similar(
+                primary, "#ffffff", threshold=90
+            ):
+                edge_color = darken_color(primary, factor=0.35)
         else:
-            top_team_by_position[position] = label_info
-    
-    # Fixed height for all labels (as a column header)
-    header_y = 103  # Increased slightly to give more space to title
+            edge_color = secondary
 
-    # Improved function to abbreviate names
-    def abbreviate_name(name, max_length=8):
-        if len(name) <= max_length:
-            return name
-            
-        # Try abbreviating using initials
-        if ' ' in name:
-            words = name.split()
-            if len(words) == 2:
-                # First word + initial of second
-                if len(words[0]) > max_length - 2:
-                    return words[0][:max_length-2] + "." + words[1][0] + "."
-                else:
-                    return words[0] + " " + words[1][0] + "."
-            else:
-                # For more words, use only initials except first
-                first = words[0][:min(5, len(words[0]))]  # Limit first word to 5 characters
-                rest = ''.join(w[0] + '.' for w in words[1:])
-                return first + " " + rest
-        
-        # If no spaces, truncate
-        return name[:max_length-2] + ".."
+        styles[team] = {
+            "facecolor": primary,
+            "edgecolor": edge_color,
+            "hatch": hatch,
+        }
+        recent_hatches.append(hatch)
+        recent_primary_colors.append(primary)
 
-    # Group adjacent positions to verify spacing
-    position_groups = []
-    current_group = []
-    for pos in sorted(top_team_by_position.keys()):
-        if not current_group or pos - current_group[-1] == 1:  # Adjacent positions
-            current_group.append(pos)
-        else:
-            if current_group:  # If group has elements
-                position_groups.append(current_group)
-            current_group = [pos]
-    
-    if current_group:  # Don't forget last group
-        position_groups.append(current_group)
-    
-    # Place team names as headers, processing by groups
-    for group in position_groups:
-        # For groups of adjacent positions, adjust sizes and rotations
-        if len(group) > 1:
-            # More compact for large groups
-            compact_mode = len(group) > 3
-            font_sizes = {}
-            rotations = {}
-            
-            # First pass: assign base sizes and detect conflicts
-            for pos in group:
-                info = top_team_by_position[pos]
-                team_name = info['team']
-                display_name = abbreviate_name(team_name, 7 if compact_mode else 8)
-                # Smaller font size for all to avoid overlaps
-                font_sizes[pos] = min(6.0, max(4.5, 8 - len(display_name) * 0.3))
-                # Alternate rotation on adjacent positions
-                rotations[pos] = 15 if pos % 2 == 0 else -15
-            
-            # Second pass: Actually place the names
-            for pos in group:
-                info = top_team_by_position[pos]
-                team_name = info['team']
-                primary = info['primary_color']
-                secondary = info['secondary_color']    
-                display_name = abbreviate_name(team_name, 7 if compact_mode else 8)
-                
-                # Check color contrast
-                is_very_light = get_color_luminance(primary) > 240
-                colors_similar = are_colors_similar(primary, secondary)
-                colors_identical = primary == secondary
-                
-                # Adjust colors according to case
-                if colors_identical:
-                    # If colors are identical, use automatic contrast
-                    bg_color = secondary
-                    text_color = get_contrasting_text_color(bg_color)
-                    edge_color = text_color  # Border same as text
-                    edge_width = 1.0
-                else:
-                    # Use primary color for text, secondary for background
-                    bg_color = secondary
-                    text_color = primary
-                    edge_color = text_color  # Border same as text
-                    edge_width = 0.8
-                
-                # Add name with adjusted rotation and size
-                ax.text(pos, header_y, display_name,
-                       ha='center', va='bottom', 
-                       fontsize=font_sizes[pos],
-                       fontweight='bold', rotation=rotations[pos],
-                       color=text_color,
-                       bbox=dict(facecolor=secondary, edgecolor=edge_color,
-                                boxstyle='round,pad=0.15',
-                                alpha=0.9, 
-                                linewidth=edge_width))
-        else:
-            # For isolated positions, use standard approach
-            pos = group[0]
-            info = top_team_by_position[pos]
-            team_name = info['team'] 
-            primary = info['primary_color']
-            secondary = info['secondary_color']    
-            display_name = abbreviate_name(team_name, 9)  # Slightly longer for isolated positions
-            
-            # Check color contrast
-            is_very_light = get_color_luminance(primary) > 240
-            colors_similar = are_colors_similar(primary, secondary)
-            colors_identical = primary == secondary
-            
-            # Adjust colors according to case
-            if colors_identical:
-                # If colors are identical, use automatic contrast
-                bg_color = secondary
-                text_color = get_contrasting_text_color(bg_color)
-                edge_color = 'black' if is_very_light else 'white'
-                edge_width = 1.5
-            elif colors_similar or is_very_light:
-                # If they are similar or primary is white, adjust for contrast
-                bg_color = secondary
-                text_color = get_contrasting_text_color(bg_color)
-                edge_color = 'black' if is_very_light else 'white'
-                edge_width = 1.5
-            else:
-                # If they have good contrast between them
-                text_color = primary
-                edge_color = 'black' if colors_similar else secondary
-                edge_width = 1.5 if colors_similar else 0.8
-                
-            # Add name without rotation
-            ax.text(pos, header_y, display_name,
-                   ha='center', va='bottom', 
-                   fontsize=min(6.5, max(5, 8 - len(display_name) * 0.2)),
-                   fontweight='bold', 
-                   color=text_color,
-                   bbox=dict(facecolor=secondary, 
-                            edgecolor=edge_color,
-                            boxstyle='round,pad=0.15',
-                            alpha=0.9,
-                            linewidth=edge_width))
-    
-    # Chart configuration
-    ax.set_title("Probability of finishing in each position", pad=40)
+    return styles
+
+
+def _legend_layout(team_count: int) -> tuple[int, int, float, bool]:
+    """Return legend columns, font size, right margin and compact mode."""
+    if team_count <= 18:
+        return 1, 10, 0.80, False
+    if team_count <= 30:
+        return 2, 8, 0.70, True
+    return 3, 7, 0.58, True
+
+
+def _legend_label(team: str, stats: dict[str, int], compact: bool) -> str:
+    """Shorten legend labels when there are many teams."""
+    if compact:
+        return f"{team} - {stats['points']} pts"
+    return f"{team} - {stats['points']} pts ({stats['matches']} played)"
+
+
+def visualize_results(
+    position_counts,
+    num_simulations,
+    team_colors,
+    base_table,
+    run_dir,
+    *,
+    show_plot: bool,
+):
+    """Render and optionally show a stacked bar chart."""
+    import matplotlib
+
+    if not show_plot:
+        matplotlib.use("Agg")
+
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+    import pandas as pd
+
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    team_colors = process_team_colors(team_colors)
+    current_stats = team_stats_from_table(base_table)
+
+    rows = []
+    for team, pos_counter in position_counts.items():
+        for position, count in sorted(pos_counter.items()):
+            rows.append(
+                {
+                    "Team": team,
+                    "Position": int(position),
+                    "Probability": (count / num_simulations) * 100
+                    if num_simulations
+                    else 0.0,
+                    "CurrentPosition": current_stats[team]["position"],
+                }
+            )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return None
+
+    pivot = frame.pivot_table(
+        index="Position",
+        columns="Team",
+        values="Probability",
+        fill_value=0.0,
+    )
+    ordered_teams = [
+        team
+        for team, _ in sorted(
+            current_stats.items(), key=lambda item: item[1]["position"]
+        )
+    ]
+    pivot = pivot.reindex(columns=ordered_teams)
+
+    legend_columns, legend_font_size, right_margin, compact_legend = _legend_layout(
+        len(ordered_teams)
+    )
+    figure_width = 15 if legend_columns == 1 else 17 if legend_columns == 2 else 19
+    figure_height = 9 if len(ordered_teams) <= 24 else 10
+    fig, ax = plt.subplots(figsize=(figure_width, figure_height))
+    bottom = None
+    legend_handles = []
+    team_styles = _build_team_styles(ordered_teams, team_colors)
+    for team in ordered_teams:
+        values = pivot[team]
+        style = team_styles[team]
+        label = _legend_label(team, current_stats[team], compact_legend)
+        ax.bar(
+            pivot.index,
+            values,
+            bottom=bottom,
+            color=style["facecolor"],
+            edgecolor=style["edgecolor"],
+            hatch=style["hatch"],
+            linewidth=1.2,
+            width=0.8,
+            zorder=3,
+        )
+        legend_handles.append(
+            Patch(
+                facecolor=style["facecolor"],
+                edgecolor=style["edgecolor"],
+                hatch=style["hatch"],
+                linewidth=1.2,
+                label=label,
+            )
+        )
+        bottom = values if bottom is None else bottom + values
+
+    ax.set_title("Probability of finishing in each position")
     ax.set_xlabel("Final position")
     ax.set_ylabel("Probability (%)")
-    
-    # Modify tick positions to center them correctly under the bars
-    ax.set_xticks(positions)    
-    ax.set_xticklabels([str(p) for p in positions])
-    
-    # Add vertical grid for better visualization of columns
-    ax.grid(axis='x', linestyle='--', alpha=0.7)
+    ax.set_xticks(list(pivot.index))
+    ax.set_ylim(0, 100)
+    ax.grid(axis="y", linestyle="--", alpha=0.4, zorder=0)
+    ax.legend(
+        handles=legend_handles,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        title="Teams",
+        ncol=legend_columns,
+        fontsize=legend_font_size,
+        title_fontsize=legend_font_size + 1,
+        columnspacing=1.2,
+        handlelength=2.2,
+        handletextpad=0.8,
+        borderaxespad=0.0,
+    )
+    fig.tight_layout(rect=(0, 0, right_margin, 1))
 
-    # Create legend manually with all teams
-    legend_items = []
-    for team in all_teams:
-        position = current_positions.get(team, 999)
-        points = current_points.get(team, 0)
-        matches = current_matches.get(team, 0)
-        # If the team has a patch (it should), use it for the legend
-        if team in team_patches:
-            # Include both points and matches played in legend label with total matches calculation
-            legend_items.append((position, team_patches[team], f"{team} - {points} pts ({matches}/{total_matches})"))
-    
-    # Sort by current position
-    legend_items.sort(key=lambda x: x[0])
-    sorted_handles = [item[1] for item in legend_items]        
-    sorted_labels = [item[2] for item in legend_items]
-    
-    ax.legend(sorted_handles, sorted_labels, title="Team (by current position)", 
-              bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    # Adjust limits to give space to labels
-    ax.set_ylim(0, 100)  # Limit to 100% to avoid white space above
-    
-    # Adjust spacing between bars and give more top margin for labels
-    plt.subplots_adjust(bottom=0.15, top=0.85, left=0.05, right=0.85)
-    plt.tight_layout()    
-    # Ensure output directory exists and save the chart image
-    run_dir.mkdir(parents=True, exist_ok=True)
-    image_file = run_dir / 'probabilities.png'
+    image_file = run_dir / "probabilities.png"
     fig.savefig(image_file, dpi=300)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
     print(f"Saved chart to {image_file}")
-    plt.show()
+    return image_file
 
-def print_simulation_results(position_counts, num_simulations, base_table, table_counter, run_dir, elapsed_time, num_fixtures):
-    """
-    Print the simulation results in a readable format.
-    
-    Args:
-        position_counts: Dictionary mapping team names to Counter objects with position frequencies
-        num_simulations: Total number of simulations performed
-        base_table: Current league standings table
-        table_counter: Counter of full final table occurrences
-        run_dir: Path to save results
-        elapsed_time: Float, total time in seconds that simulations took
-        num_fixtures: Number of fixtures simulated per iteration
-    """
+
+def print_simulation_results(
+    position_counts,
+    num_simulations,
+    base_table,
+    table_counter,
+    run_dir,
+    elapsed_time,
+    num_fixtures,
+):
+    """Print and persist simulation results in a readable format."""
+    run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    txt_file = run_dir / 'simulation.txt'
-    # Summary of iterations and elapsed time in human-readable format
+    txt_file = run_dir / "simulation.txt"
+
+    current_stats = team_stats_from_table(base_table)
     summary_line = f"Iterations run: {num_simulations}, elapsed time: {format_duration(elapsed_time)}"
+    stats_line_1 = (
+        f"Avg iterations per second: {num_simulations / elapsed_time:.2f}"
+        if elapsed_time
+        else "Avg iterations per second: 0.00"
+    )
+    stats_line_2 = (
+        f"Total matches simulated: {num_simulations * num_fixtures} "
+        f"(matches per iteration: {num_fixtures})"
+    )
+    header = "Final simulation results:"
+
     print(summary_line)
-    # Calculate current points, matches, and total matches from base_table
-    current_points = {}
-    current_matches = {}
-    total_teams = len([row for row in base_table if row[0] != 'Team'])
-    total_matches = (total_teams - 1) * 2  # Each team plays against all others twice
-
-    for row in base_table[1:]:  # Skip header row
-        team_name = row[0]
-        current_points[team_name] = int(row[7])  # Points are at index 7
-        current_matches[team_name] = int(row[1])  # Matches are at index 1
-
-    # Additional simulation stats based on remaining fixtures
-    iters_per_sec = num_simulations / elapsed_time if elapsed_time else 0
-    total_matches_simulated = num_simulations * num_fixtures
-    stats_line_1 = f"Avg iterations per second: {iters_per_sec:.2f}"
-    stats_line_2 = f"Total matches simulated: {total_matches_simulated} (matches per iteration: {num_fixtures})"
     print(stats_line_1)
     print(stats_line_2)
-    header = "📈 Final simulation results:"
-    with open(txt_file, 'w', encoding='utf-8') as f:
-        # Write summary and header to file
-        f.write(summary_line + "\n")
-        # Write additional stats before header to match console order
-        f.write(stats_line_1 + "\n")
-        f.write(stats_line_2 + "\n")
-        f.write(header + "\n")
-        # Prepare fixed-width prefixes for alignment
-        prefixes = {
-            team: f"{team} - {current_points[team]} pts ({current_matches[team]}/{total_matches})"
-            for team in position_counts
-        }
-        max_prefix_len = max(len(p) for p in prefixes.values())
-        # Team probabilities by position
-        for team, pos_counter in position_counts.items():
+
+    ordered_teams = [
+        team
+        for team, _ in sorted(
+            current_stats.items(), key=lambda item: item[1]["position"]
+        )
+    ]
+    prefixes = {
+        team: (
+            f"{team} - {current_stats[team]['points']} pts "
+            f"({current_stats[team]['matches']} played)"
+        )
+        for team in ordered_teams
+    }
+    max_prefix_len = max(len(prefix) for prefix in prefixes.values())
+
+    with txt_file.open("w", encoding="utf-8") as handle:
+        handle.write(summary_line + "\n")
+        handle.write(stats_line_1 + "\n")
+        handle.write(stats_line_2 + "\n")
+        handle.write(header + "\n")
+
+        for team in ordered_teams:
+            pos_counter = position_counts[team]
             total = sum(pos_counter.values())
-            probs = [f"Pos {pos}: {count/total*100:.3g}%" for pos, count in sorted(pos_counter.items())]
-            # Align prefix to max width
-            prefix = prefixes[team].ljust(max_prefix_len)
-            line = f"{prefix} │ {'  '.join(probs)}"
+            probs = [
+                f"Pos {pos}: {count / total * 100:.3g}%"
+                for pos, count in sorted(pos_counter.items())
+            ]
+            line = f"{prefixes[team].ljust(max_prefix_len)} | {'  '.join(probs)}"
             print(line)
-            f.write(line + "\n")
-        # Top full table predictions
-        top_header = f"📋 Top {NUM_TOP_TABLES} probable full final tables:" 
+            handle.write(line + "\n")
+
+        top_header = f"Top {NUM_TOP_TABLES} full final tables (approximate ranking):"
+        combined_header = (
+            "Combined top candidates by position (from ranked top tables):"
+        )
         print(top_header)
-        f.write(top_header + "\n")
+        handle.write(top_header + "\n")
         if table_counter:
-            for idx, (table, count) in enumerate(table_counter.most_common(NUM_TOP_TABLES), start=1):
-                pct = count / num_simulations * 100
-                teams_line = ', '.join(f"{pos+1}:{team}" for pos, team in enumerate(table))
-                tpl = f"{idx}. {teams_line} ({pct:.3g}%)"
-                print(tpl)
-                f.write(tpl + "\n")
+            for index, (table, count) in enumerate(
+                table_counter.most_common(NUM_TOP_TABLES),
+                start=1,
+            ):
+                teams_line = ", ".join(
+                    f"{position + 1}:{team}" for position, team in enumerate(table)
+                )
+                line = f"{index}. {teams_line} (score {count:.3f})"
+                print(line)
+                handle.write(line + "\n")
         else:
-            none_msg = "No full table data available."
-            print(none_msg)
-            f.write(none_msg + "\n")
-        # Combined top candidates by position
-        combined_header = "📊 Combined top candidates by position (from top tables):"
+            print("No full table data available.")
+            handle.write("No full table data available.\n")
+
         print(combined_header)
-        f.write(combined_header + "\n")
+        handle.write(combined_header + "\n")
         top_tables = [table for table, _ in table_counter.most_common(NUM_TOP_TABLES)]
         if top_tables:
-            n_top = len(top_tables)
-            num_teams = len(top_tables[0])
-            f.write("Pos\tCandidates\n")
-            for pos in range(num_teams):
-                ctr = Counter(tbl[pos] for tbl in top_tables)
-                cands = ', '.join(f"{team} ({cnt/n_top*100:.3g}%)" for team, cnt in ctr.most_common())
-                row = f"{pos+1}\t{cands}"
-                print(row)
-                f.write(row + "\n")
+            for pos in range(len(top_tables[0])):
+                candidates = Counter(table[pos] for table in top_tables)
+                row = ", ".join(
+                    f"{team} ({count / len(top_tables) * 100:.3g}%)"
+                    for team, count in candidates.most_common()
+                )
+                line = f"Pos {pos + 1}: {row}"
+                print(line)
+                handle.write(line + "\n")
+
     print(f"Saved simulation results to {txt_file}")
+    return txt_file

@@ -4,3 +4,6 @@ __pycache__
 target/
 rust_sim*.{so,pyd,dll}
 /results
+.cache/
+.pytest_cache/
+*.pyc

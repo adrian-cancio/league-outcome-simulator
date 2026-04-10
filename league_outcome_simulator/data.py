@@ -1,290 +1,499 @@
-import time
+"""Data access helpers for SofaScore and local replay fixtures."""
+
+from __future__ import annotations
+
 import json
-from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+import logging
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal, cast
+
+from curl_cffi import requests
+
+from .utils import (
+    TEAM_ROW_HEADER,
+    apply_result_to_split_tables,
+    build_table_from_team_stats,
+    stable_seed_from_text,
+    team_stats_from_table,
+)
+
+
+LOGGER = logging.getLogger(__name__)
+
+BrowserImpersonation = Literal[
+    "chrome99",
+    "chrome100",
+    "chrome101",
+    "chrome104",
+    "chrome107",
+    "chrome110",
+    "chrome116",
+    "chrome119",
+    "chrome120",
+    "chrome123",
+    "chrome124",
+    "chrome131",
+    "edge99",
+    "edge101",
+]
+
+
+DEFAULT_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.sofascore.com/",
+    "Origin": "https://www.sofascore.com",
+    "User-Agent": "Mozilla/5.0",
+}
+
+
+@dataclass(slots=True)
+class ReplaySnapshot:
+    """A replayable dataset for simulation or backtesting."""
+
+    tournament_id: int
+    season_id: int
+    league_name: str
+    snapshot_label: str
+    base_table: list[list]
+    home_table: list[list]
+    away_table: list[list]
+    fixtures: list[dict[str, Any]]
+    team_colors: dict[str, dict[str, str | None]]
+    metadata: dict[str, Any]
+
 
 class SofaScoreClient:
-    """Client for fetching football data from SofaScore API."""
-    
+    """HTTP client for fetching football data from SofaScore."""
+
     BASE_URL = "https://api.sofascore.com/api/v1"
 
-    def __init__(self, global_driver=None):
-        # Cache for JSON responses to prevent duplicate requests
-        self.json_cache = {}
-        """Initialize SofaScore client with optional global driver reference."""
-        self.driver = global_driver
-        if not self.driver:
-            self.setup_driver()
-        # Storage for calculated team scoring rates
-        self.team_lambdas = {
-            'home': {},    # λ_home per team
-            'away': {},    # λ_away per team
-            'global': {},  # λ_global per team
-        }
-    
-    def setup_driver(self):
-        """Set up a new Selenium driver if not using global driver."""
-        chrome_options = Options()
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--log-level=3")
-        chrome_options.add_argument("--disable-logging")
-        chrome_options.add_argument("--disable-usb-keyboard-detect")
-        chrome_options.add_argument("user-agent=Mozilla/5.0")
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
-        service = Service(log_path="nul")
-        try:
-            self.driver = webdriver.Chrome(service=service, options=chrome_options)
-        except Exception as e:
-            print(f"❌ Error initializing Selenium driver: {e}")
-            self.driver = None
+    def __init__(
+        self,
+        *,
+        cache_dir: Path | None = None,
+        use_disk_cache: bool = True,
+        force_refresh: bool = False,
+        timeout: int = 30,
+        retries: int = 3,
+        retry_delay: float = 1.0,
+        impersonate: BrowserImpersonation = "chrome124",
+    ) -> None:
+        self.timeout = timeout
+        self.retries = retries
+        self.retry_delay = retry_delay
+        self.impersonate = cast(BrowserImpersonation, impersonate)
+        self.json_cache: dict[str, Any] = {}
+        self.cache_dir = cache_dir or Path(".cache") / "sofascore"
+        self.use_disk_cache = use_disk_cache
+        self.force_refresh = force_refresh
+        self.session = requests.Session(headers=DEFAULT_HEADERS)
 
-    def fetch_json(self, url):
-        """Fetch JSON data from a URL using Selenium."""
-        if not self.driver:
-            print("❌ Driver not initialized")
-            return None
-            
-        # Check if we have cached data for this URL
-        if url in self.json_cache:
-            print(f"🔄 Using cached data for: {url}")
+    def _cache_path(self, url: str) -> Path:
+        filename = f"{stable_seed_from_text(url):010d}.json"
+        return self.cache_dir / filename
+
+    def fetch_json(self, url: str, *, force_refresh: bool = False) -> Any:
+        """Fetch JSON data from a URL with cache and retries."""
+        force_refresh = force_refresh or self.force_refresh
+        if not force_refresh and url in self.json_cache:
+            LOGGER.debug("Cache hit for %s", url)
             return self.json_cache[url]
-        
-        print(f"🔄 Getting data from: {url}")
-        try:
-            self.driver.get(url)
-            time.sleep(2)
-            body = self.driver.find_element("tag name", "body").text
-            # Parse and cache the JSON response
-            json_data = json.loads(body)
-            self.json_cache[url] = json_data
-            return json_data
-        except Exception as e:
-            print(f"❌ Error fetching data: {e}")
-            return None
 
-    def get_current_season_id(self, tournament_id):
-        """Get the current season ID for a tournament.
+        cache_path = self._cache_path(url)
+        if self.use_disk_cache and cache_path.exists() and not force_refresh:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.json_cache[url] = payload
+            LOGGER.debug("Disk cache hit for %s", url)
+            return payload
 
-        Matches the season year field (e.g. '25/26') to the current date.
-        Football seasons typically span Aug-May, so Jan-Jul belongs to the
-        season that started the previous calendar year.
-        """
+        last_error: Exception | None = None
+        for attempt in range(1, self.retries + 1):
+            try:
+                response = self.session.get(
+                    url,
+                    impersonate=cast(BrowserImpersonation, self.impersonate),
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                self.json_cache[url] = payload
+                if self.use_disk_cache:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+                return payload
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - exercised in integration style
+                last_error = exc
+                LOGGER.warning(
+                    "Failed to fetch %s on attempt %s/%s: %s",
+                    url,
+                    attempt,
+                    self.retries,
+                    exc,
+                )
+                if attempt < self.retries:
+                    time.sleep(self.retry_delay * attempt)
+
+        raise RuntimeError(f"Could not fetch SofaScore URL: {url}") from last_error
+
+    def get_seasons(self, tournament_id: int) -> list[dict[str, Any]]:
+        """Return all seasons for a tournament."""
         url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/seasons"
         data = self.fetch_json(url)
-        if not data or 'seasons' not in data or not data['seasons']:
+        return data.get("seasons", [])
+
+    def get_current_season_id(self, tournament_id: int) -> int | None:
+        """Best-effort detection of the active season."""
+        seasons = self.get_seasons(tournament_id)
+        if not seasons:
             return None
 
-        seasons = data['seasons']
-        now = datetime.now()
-        # For Jan-Jul, the season started the previous year; for Aug-Dec, it starts this year
-        start_year = now.year if now.month >= 8 else now.year - 1
-        # Build the expected year strings: "25/26" or just "2025" style
-        short_year = f"{start_year % 100}/{(start_year + 1) % 100}"
-        full_year = str(start_year)
+        now = datetime.now(UTC)
+        year_candidates = {
+            str(now.year),
+            str(now.year - 1),
+            f"{(now.year - 1) % 100:02d}/{now.year % 100:02d}",
+            f"{now.year % 100:02d}/{(now.year + 1) % 100:02d}",
+        }
 
+        scored = []
         for season in seasons:
-            year = season.get('year', '')
-            if year == short_year or year == full_year:
-                return season['id']
+            score = 0
+            year = str(season.get("year", ""))
+            if year in year_candidates:
+                score += 10
+            name = str(season.get("name", "")).lower()
+            if str(now.year) in name or str(now.year - 1) in name:
+                score += 3
+            score += season.get("id", 0) / 1_000_000_000
+            scored.append((score, season))
 
-        # Fallback: pick the season with the highest id that actually has fixtures
-        seasons_sorted = sorted(seasons, key=lambda x: x['id'], reverse=True)
-        return seasons_sorted[0]['id'] if seasons_sorted else None
-        
-    def get_league_table(self, tournament_id, season_id):
-        """
-        Get overall league standings and calculate λ_global for each team.
-        λ_global = total goals scored / matches played
-        """
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[0][1].get("id") if scored else None
+
+    def resolve_season_id(
+        self,
+        tournament_id: int,
+        *,
+        season_id: int | None = None,
+        season_year: str | None = None,
+    ) -> int | None:
+        """Resolve a season either by id, explicit year string or current season."""
+        if season_id is not None:
+            return season_id
+        seasons = self.get_seasons(tournament_id)
+        if season_year:
+            for season in seasons:
+                if (
+                    str(season.get("year")) == season_year
+                    or str(season.get("name")) == season_year
+                ):
+                    return season.get("id")
+            raise ValueError(
+                f"Season '{season_year}' not found for tournament {tournament_id}"
+            )
+        return self.get_current_season_id(tournament_id)
+
+    def _build_table(self, rows: list[dict[str, Any]]) -> list[list]:
+        table_rows = [TEAM_ROW_HEADER.copy()]
+        for row in rows:
+            table_rows.append(
+                [
+                    row["team"]["name"],
+                    row.get("matches", 0),
+                    row.get("wins", 0),
+                    row.get("draws", 0),
+                    row.get("losses", 0),
+                    row.get("scoresFor", 0),
+                    row.get("scoresAgainst", 0),
+                    row.get("points", 0),
+                ]
+            )
+        return table_rows
+
+    def get_standings(
+        self, tournament_id: int, season_id: int, scope: str
+    ) -> list[list] | None:
+        """Get standings for a given scope."""
+        url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/standings/{scope}"
+        data = self.fetch_json(url)
+        standings = data.get("standings", [])
+        if not standings:
+            return None
+
+        # Some competitions expose multiple groups here (e.g. MLS conferences plus an
+        # overall table). Prefer the aggregate table when present, otherwise fall back to
+        # the largest standings block instead of blindly taking the first one.
+        selected_standing = max(
+            standings,
+            key=lambda standing: (
+                len(standing.get("rows", [])),
+                "conference" not in str(standing.get("name", "")).lower(),
+            ),
+        )
+        rows = selected_standing.get("rows", [])
+        return self._build_table(rows)
+
+    def get_league_table(self, tournament_id: int, season_id: int) -> list[list] | None:
+        return self.get_standings(tournament_id, season_id, "total")
+
+    def get_home_league_table(
+        self, tournament_id: int, season_id: int
+    ) -> list[list] | None:
+        return self.get_standings(tournament_id, season_id, "home")
+
+    def get_away_league_table(
+        self, tournament_id: int, season_id: int
+    ) -> list[list] | None:
+        return self.get_standings(tournament_id, season_id, "away")
+
+    def get_team_colors(
+        self, tournament_id: int, season_id: int
+    ) -> dict[str, dict[str, str | None]]:
+        """Extract team colors from standings data."""
         url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/standings/total"
         data = self.fetch_json(url)
-        if data and 'standings' in data and data['standings']:
-            rows = [['Team', 'M', 'W', 'D', 'L', 'G', 'GA', 'PTS']]
-            
-            # Calculate global lambda for each team
-            for row in data['standings'][0]['rows']:
-                team_name = row['team']['name']
-                matches = row['matches']
-                goals_for = row['scoresFor']
-                
-                # Calculate λ_global only if matches have been played
-                if matches > 0:
-                    self.team_lambdas['global'][team_name] = goals_for / matches
-                else:
-                    # Default value for teams without matches
-                    self.team_lambdas['global'][team_name] = 1.0
-                
-                rows.append([
-                    team_name,
-                    matches,
-                    row['wins'],
-                    row['draws'],
-                    row['losses'],
-                    goals_for,
-                    row['scoresAgainst'],
-                    row['points'],
-                ])
-            return rows
-        return None
-        
-    def get_home_league_table(self, tournament_id, season_id):
-        """
-        Get home-only league standings and calculate λ_home for each team.
-        λ_home = home goals scored / home matches played
-        """
-        url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/standings/home"
-        data = self.fetch_json(url)
-        if data and 'standings' in data and data['standings']:
-            rows = [['Team', 'M', 'W', 'D', 'L', 'G', 'GA', 'PTS']]
-            
-            # Calculate home lambda for each team
-            for row in data['standings'][0]['rows']:
-                team_name = row['team']['name']
-                matches = row['matches']
-                goals_for = row['scoresFor']
-                
-                # Calculate λ_home only if home matches have been played
-                if matches > 0:
-                    self.team_lambdas['home'][team_name] = goals_for / matches
-                else:
-                    # Default value for teams without home matches
-                    self.team_lambdas['home'][team_name] = 1.0
-                
-                rows.append([
-                    team_name,
-                    matches,
-                    row['wins'],
-                    row['draws'],
-                    row['losses'],
-                    goals_for,
-                    row['scoresAgainst'],
-                    row['points'],
-                ])
-            return rows
-        return None
-        
-    def get_away_league_table(self, tournament_id, season_id):
-        """
-        Get away-only league standings and calculate λ_away for each team.
-        λ_away = away goals scored / away matches played
-        """
-        url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/standings/away"
-        data = self.fetch_json(url)
-        if data and 'standings' in data and data['standings']:
-            rows = [['Team', 'M', 'W', 'D', 'L', 'G', 'GA', 'PTS']]
-            
-            # Calculate away lambda for each team
-            for row in data['standings'][0]['rows']:
-                team_name = row['team']['name']
-                matches = row['matches']
-                goals_for = row['scoresFor']
-                
-                # Calculate λ_away only if away matches have been played
-                if matches > 0:
-                    self.team_lambdas['away'][team_name] = goals_for / matches
-                else:
-                    # Default value for teams without away matches
-                    self.team_lambdas['away'][team_name] = 1.0
-                
-                rows.append([
-                    team_name,
-                    matches,
-                    row['wins'],
-                    row['draws'],
-                    row['losses'],
-                    goals_for,
-                    row['scoresAgainst'],
-                    row['points'],
-                ])
-            return rows
-        return None
-
-    def get_remaining_fixtures(self, tournament_id, season_id):
-        """
-        Get all remaining fixtures for a tournament with pagination support.
-        The API returns up to 30 events per page, so we need to iterate through 
-        pages until we get fewer than 30 events or a 404 error.
-        """
-        all_fixtures = []
-        page = 0
-        
-        print("📅 Fetching remaining fixtures (pagination enabled)...")
-        
-        while True:
-            url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/events/next/{page}"
-            print(f"    Getting page {page} of fixtures...")
-            
-            data = self.fetch_json(url)
-            
-            # Check if we got a valid response with events
-            if not data or 'events' not in data or not data['events']:
-                print(f"    No more fixtures found (reached page {page})")
-                break
-                
-            # Process events from this page
-            page_events = []
-            for event in data['events']:
-                if event['status']['type'] == 'notstarted':
-                    page_events.append({
-                        'id': event['id'],
-                        'h': {'title': event['homeTeam']['name']},
-                        'a': {'title': event['awayTeam']['name']},
-                        'datetime': event['startTimestamp'],
-                    })
-            
-            # Add events from this page to our collection
-            all_fixtures.extend(page_events)
-            
-            # Check if we got less than 30 events (which means this is the last page)
-            if len(data['events']) < 30:
-                print(f"    End of fixtures reached (page {page} had {len(data['events'])} events)")
-                break
-                
-            # Move to next page
-            page += 1
-        
-        print(f"📊 Found {len(all_fixtures)} total remaining fixtures across {page+1} pages")
-        return all_fixtures
-    
-    def get_team_colors(self, tournament_id, season_id):
-        """Extract team colors from the standings endpoint."""
-        url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/standings/total"
-        data = self.fetch_json(url)
-        team_colors = {}
-        if not data or "standings" not in data or not data["standings"]:
-            return team_colors
-            
-        default_blue = "#374df5"  # Common default color from API
-        
-        print("🎨 Loading team colors...")
-        # Process all teams from the standings
+        team_colors: dict[str, dict[str, str | None]] = {}
+        default_blue = "#374df5"
         for standing in data.get("standings", []):
             for row in standing.get("rows", []):
                 team = row.get("team", {})
-                team_name = team.get("name")
-                if not team_name:
+                name = team.get("name")
+                if not name:
                     continue
-                # Extract colors from the team data
                 team_colors_data = team.get("teamColors", {})
-                primary_color = team_colors_data.get("primary")
-                secondary_color = team_colors_data.get("secondary")
-                
-                # Store colors (will be processed later if needed)
-                team_colors[team_name] = {
-                    "primary": primary_color if primary_color and primary_color != default_blue else None,
-                    "secondary": secondary_color if secondary_color and secondary_color != default_blue else None,
+                primary = team_colors_data.get("primary")
+                secondary = team_colors_data.get("secondary")
+                team_colors[name] = {
+                    "primary": primary if primary and primary != default_blue else None,
+                    "secondary": secondary
+                    if secondary and secondary != default_blue
+                    else None,
                 }
         return team_colors
 
-    def close(self):
-        """Close the Selenium driver if it's not a shared global driver."""
-        if self.driver:
+    def _event_to_fixture(self, event: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": event["id"],
+            "h": {"title": event["homeTeam"]["name"]},
+            "a": {"title": event["awayTeam"]["name"]},
+            "datetime": event.get("startTimestamp"),
+            "status": event.get("status", {}).get("type"),
+        }
+
+    def get_events_page(
+        self,
+        tournament_id: int,
+        season_id: int,
+        direction: str,
+        page: int,
+    ) -> dict[str, Any]:
+        """Return a page of events in a given direction."""
+        url = f"{self.BASE_URL}/unique-tournament/{tournament_id}/season/{season_id}/events/{direction}/{page}"
+        return self.fetch_json(url)
+
+    def _collect_events(
+        self,
+        tournament_id: int,
+        season_id: int,
+        direction: str,
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        page = 0
+        while True:
             try:
-                self.driver.quit()
-                self.driver = None
-            except Exception:
-                pass
+                data = self.get_events_page(tournament_id, season_id, direction, page)
+            except RuntimeError:
+                if page == 0:
+                    return []
+                raise
+            page_events = data.get("events", [])
+            if not page_events:
+                break
+            events.extend(page_events)
+            if not data.get("hasNextPage"):
+                break
+            page += 1
+        return events
+
+    def get_remaining_fixtures(
+        self, tournament_id: int, season_id: int
+    ) -> list[dict[str, Any]]:
+        """Return not-started fixtures for a season."""
+        events = self._collect_events(tournament_id, season_id, "next")
+        fixtures = [
+            self._event_to_fixture(event)
+            for event in events
+            if event.get("status", {}).get("type") == "notstarted"
+        ]
+        LOGGER.info("Found %s remaining fixtures", len(fixtures))
+        return fixtures
+
+    def get_completed_events(
+        self, tournament_id: int, season_id: int
+    ) -> list[dict[str, Any]]:
+        """Return finished events for a season."""
+        events = self._collect_events(tournament_id, season_id, "last")
+        completed = [
+            event
+            for event in events
+            if event.get("status", {}).get("type") == "finished"
+        ]
+        completed.sort(key=lambda event: event.get("startTimestamp", 0))
+        return completed
+
+    def get_season_metadata(self, tournament_id: int, season_id: int) -> dict[str, Any]:
+        """Fetch a small metadata snapshot for a season."""
+        seasons = self.get_seasons(tournament_id)
+        season = next(
+            (season for season in seasons if season.get("id") == season_id), None
+        )
+        league_name = season.get("name") if season else f"Tournament {tournament_id}"
+        return {
+            "tournament_id": tournament_id,
+            "season_id": season_id,
+            "season": season,
+            "league_name": league_name,
+        }
+
+    def build_snapshot_from_cutoff(
+        self,
+        tournament_id: int,
+        season_id: int,
+        *,
+        matchday_cutoff: int | None = None,
+        completed_match_count: int | None = None,
+    ) -> ReplaySnapshot:
+        """Build standings and remaining fixtures from completed historical events."""
+        metadata = self.get_season_metadata(tournament_id, season_id)
+        all_completed = self.get_completed_events(tournament_id, season_id)
+        all_upcoming = self.get_remaining_fixtures(tournament_id, season_id)
+
+        if matchday_cutoff is None and completed_match_count is None:
+            raise ValueError(
+                "Backtest snapshot requires matchday_cutoff or completed_match_count"
+            )
+
+        if matchday_cutoff is not None:
+            completed_subset = [
+                event
+                for event in all_completed
+                if event.get("roundInfo", {}).get("round") <= matchday_cutoff
+            ]
+            future_finished = [
+                event
+                for event in all_completed
+                if event.get("roundInfo", {}).get("round") > matchday_cutoff
+            ]
+            label = f"matchday-{matchday_cutoff}"
+        else:
+            completed_subset = all_completed[:completed_match_count]
+            future_finished = all_completed[completed_match_count:]
+            label = f"after-{completed_match_count}-matches"
+
+        season_total = self.get_league_table(tournament_id, season_id)
+        if not season_total:
+            raise RuntimeError("Could not load standings to infer teams")
+
+        team_stats = team_stats_from_table(
+            [
+                TEAM_ROW_HEADER.copy(),
+                *[[row[0], 0, 0, 0, 0, 0, 0, 0] for row in season_total[1:]],
+            ]
+        )
+        home_stats = team_stats_from_table(
+            [
+                TEAM_ROW_HEADER.copy(),
+                *[[row[0], 0, 0, 0, 0, 0, 0, 0] for row in season_total[1:]],
+            ]
+        )
+        away_stats = team_stats_from_table(
+            [
+                TEAM_ROW_HEADER.copy(),
+                *[[row[0], 0, 0, 0, 0, 0, 0, 0] for row in season_total[1:]],
+            ]
+        )
+
+        for event in completed_subset:
+            home_team = event["homeTeam"]["name"]
+            away_team = event["awayTeam"]["name"]
+            home_goals = int(event.get("homeScore", {}).get("current", 0))
+            away_goals = int(event.get("awayScore", {}).get("current", 0))
+
+            apply_result_to_split_tables(
+                team_stats,
+                home_stats,
+                away_stats,
+                home_team,
+                away_team,
+                home_goals,
+                away_goals,
+            )
+
+        future_fixtures = [
+            self._event_to_fixture(event) for event in future_finished
+        ] + all_upcoming
+        future_fixtures.sort(key=lambda fixture: fixture.get("datetime") or 0)
+
+        team_colors = self.get_team_colors(tournament_id, season_id)
+        return ReplaySnapshot(
+            tournament_id=tournament_id,
+            season_id=season_id,
+            league_name=metadata["league_name"],
+            snapshot_label=label,
+            base_table=build_table_from_team_stats(team_stats),
+            home_table=build_table_from_team_stats(home_stats),
+            away_table=build_table_from_team_stats(away_stats),
+            fixtures=future_fixtures,
+            team_colors=team_colors,
+            metadata={
+                **metadata,
+                "snapshot_label": label,
+                "completed_events_used": len(completed_subset),
+                "remaining_fixtures": len(future_fixtures),
+                "cutoff_matchday": matchday_cutoff,
+                "cutoff_completed_matches": completed_match_count,
+            },
+        )
+
+    def export_snapshot(self, snapshot: ReplaySnapshot, destination: Path) -> Path:
+        """Persist a replay snapshot to disk."""
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "tournament_id": snapshot.tournament_id,
+            "season_id": snapshot.season_id,
+            "league_name": snapshot.league_name,
+            "snapshot_label": snapshot.snapshot_label,
+            "base_table": snapshot.base_table,
+            "home_table": snapshot.home_table,
+            "away_table": snapshot.away_table,
+            "fixtures": snapshot.fixtures,
+            "team_colors": snapshot.team_colors,
+            "metadata": snapshot.metadata,
+        }
+        destination.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return destination
+
+    def load_snapshot(self, snapshot_path: Path) -> ReplaySnapshot:
+        """Load a replay snapshot from disk."""
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        return ReplaySnapshot(
+            tournament_id=payload["tournament_id"],
+            season_id=payload["season_id"],
+            league_name=payload["league_name"],
+            snapshot_label=payload["snapshot_label"],
+            base_table=payload["base_table"],
+            home_table=payload["home_table"],
+            away_table=payload["away_table"],
+            fixtures=payload["fixtures"],
+            team_colors=payload["team_colors"],
+            metadata=payload["metadata"],
+        )
+
+    def close(self) -> None:
+        """Close the underlying HTTP session."""
+        self.session.close()

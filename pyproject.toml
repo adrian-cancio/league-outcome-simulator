@@ -9,7 +9,27 @@ description = "Rust-accelerated simulation for League Outcome Simulator"
 authors = [{name = "adrian-cancio"}]
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
+dependencies = [
+    "curl-cffi>=0.15.0",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.13",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+]
+
+[project.scripts]
+league-outcome-simulator = "league_outcome_simulator.cli:main"
 
 [tool.maturin]
 bindings = "pyo3"
+extras = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

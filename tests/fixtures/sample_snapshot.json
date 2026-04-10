@@ -1,0 +1,53 @@
+{
+  "tournament_id": 17,
+  "season_id": 99999,
+  "league_name": "Sample League",
+  "snapshot_label": "fixture-snapshot",
+  "base_table": [
+    ["Team", "M", "W", "D", "L", "G", "GA", "PTS"],
+    ["Alpha FC", 2, 2, 0, 0, 4, 1, 6],
+    ["Bravo United", 2, 1, 0, 1, 2, 2, 3],
+    ["Charlie Town", 2, 0, 1, 1, 1, 2, 1],
+    ["Delta City", 2, 0, 1, 1, 1, 3, 1]
+  ],
+  "home_table": [
+    ["Team", "M", "W", "D", "L", "G", "GA", "PTS"],
+    ["Alpha FC", 1, 1, 0, 0, 2, 0, 3],
+    ["Bravo United", 1, 1, 0, 0, 1, 0, 3],
+    ["Charlie Town", 1, 0, 1, 0, 1, 1, 1],
+    ["Delta City", 1, 0, 1, 0, 0, 0, 1]
+  ],
+  "away_table": [
+    ["Team", "M", "W", "D", "L", "G", "GA", "PTS"],
+    ["Alpha FC", 1, 1, 0, 0, 2, 1, 3],
+    ["Bravo United", 1, 0, 0, 1, 1, 2, 0],
+    ["Charlie Town", 1, 0, 0, 1, 0, 1, 0],
+    ["Delta City", 1, 0, 0, 1, 1, 3, 0]
+  ],
+  "fixtures": [
+    {
+      "id": 1,
+      "h": {"title": "Alpha FC"},
+      "a": {"title": "Bravo United"},
+      "datetime": 2000000000,
+      "status": "notstarted"
+    },
+    {
+      "id": 2,
+      "h": {"title": "Charlie Town"},
+      "a": {"title": "Delta City"},
+      "datetime": 2000003600,
+      "status": "notstarted"
+    }
+  ],
+  "team_colors": {
+    "Alpha FC": {"primary": "#cc0000", "secondary": "#ffffff"},
+    "Bravo United": {"primary": "#0033cc", "secondary": "#ffffff"},
+    "Charlie Town": {"primary": "#008800", "secondary": "#ffffff"},
+    "Delta City": {"primary": "#555555", "secondary": "#eeeeee"}
+  },
+  "metadata": {
+    "snapshot_source": "fixture",
+    "snapshot_timestamp": "2026-04-10T00:00:00Z"
+  }
+}
