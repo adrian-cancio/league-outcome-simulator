@@ -16,7 +16,7 @@ def test_leagues_command(capsys):
     assert "premier-league" in captured.out
 
 
-def test_simulate_snapshot_no_gui(tmp_path):
+def test_simulate_snapshot_no_gui(tmp_path, capsys):
     exit_code = cli.main(
         [
             "simulate",
@@ -40,6 +40,10 @@ def test_simulate_snapshot_no_gui(tmp_path):
     manifests = list(tmp_path.glob("Sample_League/*/*/manifest.json"))
     assert manifests, "expected manifest.json to be created"
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    output = capsys.readouterr().out
+    assert "Monte Carlo sampling SE" in output
+    assert "not predictive accuracy" in output
+    assert "Final Average Percentage Point Error" not in output
     assert manifest["completed_simulations"] == 100
     assert manifest["league_name"] == "Sample League"
     assert len(manifest["position_probabilities"]) == 4

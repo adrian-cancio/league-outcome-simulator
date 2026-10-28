@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
+import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -59,6 +61,7 @@ DEFAULT_HEADERS = {
 
 CACHE_SCHEMA = 2
 CACHE_FILE_PREFIX = "v2-"
+DEFAULT_CACHE_DIR = Path(".cache") / "sofascore"
 
 KIND_SEASONS = "seasons"
 KIND_SEASON_DATA = "season-data"
@@ -260,6 +263,24 @@ def parse_iso_utc(value: Any) -> float | None:
     return parsed.timestamp()
 
 
+def legacy_cache_files(cache_dir: Path) -> list[Path]:
+    """List pre-v2 cache files: regular ``*.json`` files not named ``v2-*``.
+
+    Anything else (v2 entries, temporary files, sub-directories, symlinks, files of
+    other types) is deliberately left alone.
+    """
+    if not cache_dir.is_dir():
+        return []
+    return sorted(
+        path
+        for path in cache_dir.iterdir()
+        if path.suffix == ".json"
+        and not path.name.startswith(CACHE_FILE_PREFIX)
+        and not path.is_symlink()
+        and path.is_file()
+    )
+
+
 def _canonical_path(url: str) -> str:
     """Reduce a URL (or bare path) to its host-independent API path."""
     path = urlsplit(url).path if "://" in url else url
@@ -331,7 +352,7 @@ class SofaScoreClient:
         ``fetched_at`` and the URL. They are keyed by the host-independent API path
         (which contains the season id) and expire by kind of data, see
         :class:`CachePolicy`. Files without metadata (the pre-v2 layout) are never
-        read and never deleted.
+        read or automatically deleted (the CLI offers explicit legacy cleanup).
     """
 
     BASE_URL = DEFAULT_BASE_URL
@@ -362,7 +383,7 @@ class SofaScoreClient:
         ).rstrip("/")
         self.fallback = fallback
         self.cache_policy = cache_policy or CachePolicy()
-        self.cache_dir = cache_dir or Path(".cache") / "sofascore"
+        self.cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self.use_disk_cache = use_disk_cache
         self.force_refresh = force_refresh
         self.session = requests.Session(headers=DEFAULT_HEADERS)
@@ -418,7 +439,13 @@ class SofaScoreClient:
             )
             return None
 
-        age = self._clock() - float(fetched_at)
+        try:
+            timestamp = float(fetched_at)
+        except OverflowError:
+            return None
+        if not math.isfinite(timestamp):
+            return None
+        age = self._clock() - timestamp
         ttl = self.cache_policy.ttl_for(kind, bool(raw.get("finished")))
         if age < -CLOCK_SKEW_SECONDS or age >= ttl:
             LOGGER.info(
@@ -452,9 +479,27 @@ class SofaScoreClient:
         }
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = cache_path.with_name(cache_path.name + ".tmp")
-            tmp_path.write_text(json.dumps(document), encoding="utf-8")
-            os.replace(tmp_path, cache_path)
+            # Unique per write so concurrent writers (other processes, or the same
+            # path written twice) never share a temporary file.
+            for _ in range(10):
+                tmp_path = cache_path.with_name(
+                    f"{cache_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+                )
+                try:
+                    stream = tmp_path.open("x", encoding="utf-8")
+                except FileExistsError:
+                    continue  # Never truncate or remove another writer's reservation.
+                try:
+                    with stream:
+                        json.dump(document, stream)
+                    os.replace(tmp_path, cache_path)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+                break
+            else:
+                raise FileExistsError(
+                    "Could not reserve a cache temporary file after 10 attempts"
+                )
         except OSError as exc:
             LOGGER.warning("Could not write cache file %s: %s", cache_path, exc)
 
@@ -669,7 +714,20 @@ class SofaScoreClient:
             if entry is not None:
                 try:
                     state = SeasonState(**entry.payload)
-                except TypeError:
+                    if (
+                        state.status not in (
+                            STATUS_FINISHED, STATUS_IN_PROGRESS, STATUS_NOT_STARTED,
+                            STATUS_UNKNOWN,
+                        )
+                        or type(state.matches_played) is not int
+                        or state.matches_played < 0
+                        or type(state.pending) is not int
+                        or state.pending < 0
+                        or type(state.has_fixtures) is not bool
+                        or type(state.settled) is not bool
+                    ):
+                        raise ValueError("Invalid cached SeasonState fields")
+                except (TypeError, ValueError):
                     LOGGER.info("Cached season state for %s is malformed; recomputing", path)
                 else:
                     self._states[key] = state

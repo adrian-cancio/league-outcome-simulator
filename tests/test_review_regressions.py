@@ -298,20 +298,10 @@ def test_backtest_cli_without_season_flags_runs_on_the_finished_season(
     mocked_network: dict[str, Any], tmp_path: Path
 ) -> None:
     mocked_network["routes"] = _finished_seasons_routes()
-    exit_code = cli.main(
-        [*_args("backtest", tmp_path / "out", "--matchday-cutoff", "0", "--export-snapshot")]
-    )
-    assert exit_code == 0
-    manifest = _only_manifest(tmp_path / "out")
-    assert manifest["season_id"] == 200
-    assert manifest["data_source"] == "network"
-    (run_dir,) = {p.parent for p in (tmp_path / "out").glob("*/*/*/manifest.json")}
-    assert (run_dir / "backtest.json").is_file()
-    snapshots = list((tmp_path / "out" / "snapshots").glob("*/*.json"))
-    assert snapshots
-    exported = json.loads(snapshots[0].read_text(encoding="utf-8"))
-    assert exported["season_id"] == 200
-    assert exported["metadata"]["data_source"] == "network"
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(_args("backtest", tmp_path / "out", "--matchday-cutoff", "0"))
+    assert excinfo.value.code == 2
+    assert not (tmp_path / "out").exists()
 
 
 # ------------------------------------------------ 4. provenance scoped to the season used
@@ -421,7 +411,10 @@ def test_cli_unknown_season_id_is_a_clean_error(
     extra = ["--matchday-cutoff", "1"] if command == "backtest" else []
     with pytest.raises(SystemExit) as excinfo:
         cli.main(_args(command, tmp_path / "out", "--season-id", "999", *extra))
-    assert "999" in str(excinfo.value) and "not listed" in str(excinfo.value)
+    if command == "backtest":
+        assert excinfo.value.code == 2  # Deprecated before any network access.
+    else:
+        assert "999" in str(excinfo.value) and "not listed" in str(excinfo.value)
     assert not (tmp_path / "out").exists()
 
 
@@ -445,9 +438,7 @@ def test_backtest_bad_season_year_is_a_clean_error(
         cli.main(
             _args("backtest", tmp_path / "out", "--season-year", "99/99", "--matchday-cutoff", "1")
         )
-    message = str(excinfo.value)
-    assert "99/99" in message and "not found" in message
-    assert "25/26" in message  # lists what is available
+    assert excinfo.value.code == 2  # Round-based evaluation is always refused.
 
 
 # ---------------------------------------- low-priority gaps: retries, 404s, pagination

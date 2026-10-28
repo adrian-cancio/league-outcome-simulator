@@ -6,7 +6,10 @@ import numpy as np
 
 
 def calculate_pp_error(position_counts, num_simulations, num_teams) -> float:
-    """Calculate the average standard error in percentage points."""
+    """Mean plug-in Monte Carlo sampling SE (pp), conditional on fixed inputs.
+
+    This measures sampling noise, not predictive accuracy or model uncertainty.
+    """
     if num_simulations <= 0:
         return 0.0
 

@@ -7,7 +7,6 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
-use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -68,8 +67,11 @@ impl DixonColes {
     }
 
     fn poisson_pmf(k: i64, lambda: f64) -> f64 {
-        if lambda <= 0.0 || k < 0 {
+        if k < 0 {
             return 0.0;
+        }
+        if lambda == 0.0 {
+            return if k == 0 { 1.0 } else { 0.0 };
         }
         let k_float = k as f64;
         let log_lambda = lambda.ln();
@@ -89,31 +91,46 @@ impl DixonColes {
         lambda_a: f64,
         rho: f64,
         max_goals: usize,
-    ) -> ProbabilityDistribution {
+    ) -> Result<ProbabilityDistribution, String> {
+        if !lambda_h.is_finite()
+            || lambda_h < 0.0
+            || !lambda_a.is_finite()
+            || lambda_a < 0.0
+            || !rho.is_finite()
+        {
+            return Err("Rates must be finite and nonnegative; rho must be finite".into());
+        }
         let mut flat_probs = Vec::with_capacity((max_goals + 1) * (max_goals + 1));
         let mut total = 0.0;
         for h in 0..=max_goals {
             for a in 0..=max_goals {
                 let p = Self::result_probability(h as i64, a as i64, lambda_h, lambda_a, rho);
+                if !p.is_finite() || p < 0.0 {
+                    return Err(format!(
+                        "Invalid Dixon-Coles probability at ({h}, {a}): {p}"
+                    ));
+                }
                 flat_probs.push(p);
                 total += p;
             }
         }
 
+        if !total.is_finite() || total <= 0.0 {
+            return Err("Probability distribution must have finite positive total mass".into());
+        }
         let mut cdf = Vec::with_capacity(flat_probs.len());
         let mut acc = 0.0;
-        for prob in flat_probs.iter_mut() {
-            *prob /= total.max(f64::EPSILON);
+        for prob in &flat_probs {
             acc += *prob;
-            cdf.push(acc);
+            cdf.push(acc / total);
         }
         if let Some(last) = cdf.last_mut() {
             *last = 1.0;
         }
-        ProbabilityDistribution {
+        Ok(ProbabilityDistribution {
             cdf,
             dim: max_goals + 1,
-        }
+        })
     }
 
     fn get_probability_matrix(
@@ -121,29 +138,26 @@ impl DixonColes {
         lambda_a: f64,
         rho: f64,
         max_goals: usize,
-    ) -> ProbabilityDistribution {
+    ) -> Result<ProbabilityDistribution, String> {
         let key = (lambda_h.to_bits(), lambda_a.to_bits(), rho.to_bits());
         let mut cache = PROBABILITY_CACHE
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         match cache.entry(key) {
-            Entry::Occupied(entry) => entry.get().clone(),
-            Entry::Vacant(entry) => entry
-                .insert(Self::precompute_probability_matrix(
-                    lambda_h, lambda_a, rho, max_goals,
-                ))
-                .clone(),
+            Entry::Occupied(entry) => Ok(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                let distribution =
+                    Self::precompute_probability_matrix(lambda_h, lambda_a, rho, max_goals)?;
+                Ok(entry.insert(distribution).clone())
+            }
         }
     }
 
     fn simulate_from_distribution<R: Rng>(rng: &mut R, pd: &ProbabilityDistribution) -> (i64, i64) {
         let u: f64 = rng.gen();
-        let idx = match pd
-            .cdf
-            .binary_search_by(|value| value.partial_cmp(&u).unwrap_or(Ordering::Greater))
-        {
-            Ok(index) | Err(index) => index.min(pd.cdf.len().saturating_sub(1)),
-        };
+        // Strictly greater selects the first positive interval, including when
+        // u is exactly zero or lies on a plateau of zero-mass cells.
+        let idx = pd.cdf.partition_point(|value| *value <= u);
         ((idx / pd.dim) as i64, (idx % pd.dim) as i64)
     }
 }
@@ -168,6 +182,17 @@ fn parse_simulation_input(
     fixtures: PyObject,
     home_table: PyObject,
     away_table: PyObject,
+) -> PyResult<SimulationInput> {
+    parse_model_input(py, base_table, fixtures, home_table, away_table, false)
+}
+
+fn parse_model_input(
+    py: Python,
+    base_table: PyObject,
+    fixtures: PyObject,
+    home_table: PyObject,
+    away_table: PyObject,
+    candidate: bool,
 ) -> PyResult<SimulationInput> {
     let base: &PyList = base_table.extract(py)?;
     let fixtures_list: &PyList = fixtures.extract(py)?;
@@ -293,8 +318,25 @@ fn parse_simulation_input(
         let lambda_h =
             avg_league_goals * home_attack[home_idx] * away_defense[away_idx] * home_advantage;
         let lambda_a = avg_league_goals * away_attack[away_idx] * home_defense[home_idx];
+        let (lambda_h, lambda_a) = if candidate {
+            let hm_total: i64 = home_stats.iter().map(|s| s.2).sum();
+            let am_total: i64 = away_stats.iter().map(|s| s.2).sum();
+            let (hgf, hga, hm) = home_stats[home_idx];
+            let (agf, aga, am) = away_stats[away_idx];
+            if hm_total <= 0 || am_total <= 0 || home_total_gf <= 0
+                || away_total_gf <= 0 || hm <= 0 || am <= 0 {
+                return Err(PyValueError::new_err("venue_normalized_v1 requires positive venue means and venue samples"));
+            }
+            let h = home_total_gf as f64 / hm_total as f64;
+            let a = away_total_gf as f64 / am_total as f64;
+            (h * (hgf as f64 / hm as f64 / h) * (aga as f64 / am as f64 / h),
+             a * (agf as f64 / am as f64 / a) * (hga as f64 / hm as f64 / a))
+        } else {
+            (lambda_h, lambda_a)
+        };
         let distribution =
-            DixonColes::get_probability_matrix(lambda_h, lambda_a, DEFAULT_RHO, MAX_GOALS);
+            DixonColes::get_probability_matrix(lambda_h, lambda_a, DEFAULT_RHO, MAX_GOALS)
+                .map_err(PyValueError::new_err)?;
         fixtures.push(FixtureSimulation {
             home_idx,
             away_idx,
@@ -482,6 +524,46 @@ fn simulate_bulk(
     Ok(result.into())
 }
 
+/// Deterministic H/D/A masses from the exact CDF used by season sampling.
+#[pyfunction(model = "\"current_v1\"")]
+fn predict_outcomes(
+    py: Python,
+    base_table: PyObject,
+    fixtures: PyObject,
+    home_table: PyObject,
+    away_table: PyObject,
+    model: &str,
+) -> PyResult<Vec<[f64; 3]>> {
+    let candidate = match model {
+        "current_v1" => false,
+        "venue_normalized_v1" => true,
+        _ => return Err(PyValueError::new_err("Unknown model ID")),
+    };
+    let input = parse_model_input(py, base_table, fixtures, home_table, away_table, candidate)?;
+    Ok(input
+        .fixtures
+        .iter()
+        .map(|fixture| {
+            let mut masses = [0.0; 3];
+            let mut previous = 0.0;
+            for (index, cumulative) in fixture.distribution.cdf.iter().enumerate() {
+                let home = index / fixture.distribution.dim;
+                let away = index % fixture.distribution.dim;
+                let class = if home > away {
+                    0
+                } else if home == away {
+                    1
+                } else {
+                    2
+                };
+                masses[class] += cumulative - previous;
+                previous = *cumulative;
+            }
+            masses
+        })
+        .collect())
+}
+
 #[pymodule]
 fn league_outcome_simulator_rust(_py: Python, m: &PyModule) -> PyResult<()> {
     INIT_RAYON.call_once(|| {
@@ -490,6 +572,11 @@ fn league_outcome_simulator_rust(_py: Python, m: &PyModule) -> PyResult<()> {
             .build_global();
     });
 
+    m.add_function(wrap_pyfunction!(predict_outcomes, m)?)?;
+    m.add(
+        "MODEL_CONSTANTS",
+        (HOME_ADVANTAGE, DEFAULT_LAMBDA, DEFAULT_RHO, MAX_GOALS),
+    )?;
     m.add_function(wrap_pyfunction!(simulate_season, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_bulk, m)?)?;
     Ok(())
@@ -500,9 +587,139 @@ mod tests {
     use super::*;
 
     #[test]
+    fn poisson_zero_rate_is_point_mass() {
+        assert_eq!(DixonColes::poisson_pmf(0, 0.0), 1.0);
+        assert_eq!(DixonColes::poisson_pmf(1, 0.0), 0.0);
+        assert_eq!(DixonColes::poisson_pmf(-1, 0.0), 0.0);
+    }
+
+    #[test]
+    fn invalid_distributions_explicitly_error() {
+        for (home, away, rho) in [
+            (-1.0, 1.0, 0.0),
+            (1.0, -1.0, 0.0),
+            (f64::NAN, 1.0, 0.0),
+            (1.0, f64::NAN, 0.0),
+            (f64::INFINITY, 1.0, 0.0),
+            (1.0, f64::INFINITY, 0.0),
+            (1.0, 1.0, f64::NAN),
+            (1.0, 1.0, f64::INFINITY),
+            (1.0, 1.0, f64::NEG_INFINITY),
+            (2.0, 1.0, -1.0),
+            (1.0, 1.0, 2.0),
+            (1000.0, 1000.0, 0.0),
+            (f64::MAX, f64::MAX, -0.1),
+        ] {
+            let result = DixonColes::precompute_probability_matrix(home, away, rho, MAX_GOALS);
+            assert!(
+                result.is_err(),
+                "Expected explicit error for {home}, {away}, {rho}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_rates_produce_valid_point_mass() {
+        let result = DixonColes::precompute_probability_matrix(0.0, 0.0, DEFAULT_RHO, MAX_GOALS);
+        // The first cell must contain all probability, not a fabricated final cell.
+        assert!(result.unwrap().cdf.iter().all(|&mass| mass == 1.0));
+    }
+
+    #[test]
+    fn current_venue_normalization_uses_actual_parse_path() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let base = py
+                .eval(
+                    "[['header'], ['H', 4, 0, 0, 0, 5, 5, 0], ['A', 4, 0, 0, 0, 5, 5, 0]]",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .into_py(py);
+            let home = py
+                .eval(
+                    "[['header'], ['H', 2, 0, 0, 0, 3, 2, 0], ['A', 2, 0, 0, 0, 3, 3, 0]]",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .into_py(py);
+            let away = py
+                .eval(
+                    "[['header'], ['H', 2, 0, 0, 0, 2, 3, 0], ['A', 2, 0, 0, 0, 2, 3, 0]]",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .into_py(py);
+            let fixtures = py
+                .eval("[{'h': {'title': 'H'}, 'a': {'title': 'A'}}]", None, None)
+                .unwrap()
+                .into_py(py);
+            let input = parse_simulation_input(
+                py,
+                base.clone_ref(py),
+                fixtures.clone_ref(py),
+                home.clone_ref(py),
+                away.clone_ref(py),
+            )
+            .unwrap();
+            // Exercise the public deterministic export against the actual sampler.
+            let masses = predict_outcomes(
+                py,
+                base.clone_ref(py),
+                fixtures.clone_ref(py),
+                home.clone_ref(py),
+                away.clone_ref(py),
+                "current_v1",
+            )
+            .unwrap()[0];
+            let samples = 100_000;
+            let mut rng = ChaCha8Rng::seed_from_u64(20261028);
+            let mut counts = [0usize; 3];
+            for _ in 0..samples {
+                let (home_goals, away_goals) = DixonColes::simulate_from_distribution(
+                    &mut rng,
+                    &input.fixtures[0].distribution,
+                );
+                counts[if home_goals > away_goals {
+                    0
+                } else if home_goals == away_goals {
+                    1
+                } else {
+                    2
+                }] += 1;
+            }
+            // Hoeffding plus union bound: P(any of 3 errors > epsilon) <= 1e-6.
+            let tolerance = (f64::ln(6.0 / 1e-6) / (2.0 * samples as f64)).sqrt();
+            for (count, mass) in counts.iter().zip(masses) {
+                assert!((*count as f64 / samples as f64 - mass).abs() < tolerance);
+            }
+            assert!((masses.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+            let invalid_home = py
+                .eval("[['header'], ['H', 2, 0, 0, 0, -3, 2, 0]]", None, None)
+                .unwrap()
+                .into_py(py);
+            let error = parse_simulation_input(py, base, fixtures, invalid_home, away).unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            let expected =
+                DixonColes::get_probability_matrix(2.7, 0.8, DEFAULT_RHO, MAX_GOALS).unwrap();
+            for (actual, expected) in input.fixtures[0]
+                .distribution
+                .cdf
+                .iter()
+                .zip(expected.cdf.iter())
+            {
+                assert!((actual - expected).abs() < 1e-14);
+            }
+        });
+    }
+
+    #[test]
     fn dixon_coles_match_returns_reasonable_scores() {
         let mut rng = ChaCha8Rng::seed_from_u64(123);
-        let pd = DixonColes::get_probability_matrix(1.4, 0.9, DEFAULT_RHO, MAX_GOALS);
+        let pd = DixonColes::get_probability_matrix(1.4, 0.9, DEFAULT_RHO, MAX_GOALS).unwrap();
         let (home, away) = DixonColes::simulate_from_distribution(&mut rng, &pd);
         assert!(home >= 0);
         assert!(away >= 0);

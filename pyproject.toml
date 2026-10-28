@@ -29,6 +29,7 @@ league-outcome-simulator = "league_outcome_simulator.cli:main"
 
 [tool.maturin]
 bindings = "pyo3"
+features = ["pyo3/extension-module"]
 extras = ["dev"]
 
 [tool.pytest.ini_options]

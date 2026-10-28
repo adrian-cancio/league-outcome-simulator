@@ -8,7 +8,7 @@ import logging
 import re
 import time
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ from tqdm import tqdm
 from .catalog import LEAGUES_BY_INDEX, list_leagues, resolve_league_identifier
 from .data import (
     DEFAULT_BASE_URL,
+    DEFAULT_CACHE_DIR,
     DEFAULT_IMPERSONATE,
     SOURCE_SNAPSHOT,
     STATUS_NOT_STARTED,
@@ -28,6 +29,7 @@ from .data import (
     SofaScoreError,
     format_age,
     iso_utc,
+    legacy_cache_files,
     parse_iso_utc,
 )
 from .error_estimation import calculate_pp_error
@@ -531,11 +533,11 @@ def run_simulation(config: SimulationConfig) -> dict[str, Any]:
                     sim_count_completed,
                     len(position_counts),
                 )
-                progress.set_postfix_str(f"Error: {pp_error:.3f} pp")
+                progress.set_postfix_str(f"Monte Carlo sampling SE: {pp_error:.3f} pp")
                 if pp_error <= config.target_pp_error:
                     stop_reason = "target_pp_error"
                     tqdm.write(
-                        f"Target PP Error of {config.target_pp_error:.3f} pp reached after {sim_count_completed} simulations."
+                        f"Target mean Monte Carlo sampling SE of {config.target_pp_error:.3f} pp reached after {sim_count_completed} simulations."
                     )
                     break
                 last_error_update_time = current_time
@@ -615,7 +617,8 @@ def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         write_json(run_dir / "results.json", manifest)
 
     print(f"Completed {num_simulations} simulations")
-    print(f"Final Average Percentage Point Error: {final_pp_error:.3f}")
+    print(f"Final mean Monte Carlo sampling SE: {final_pp_error:.3f} pp")
+    print("Conditional on fixed inputs/model; not predictive accuracy or model uncertainty.")
     print(f"Run directory: {run_dir}")
     return manifest
 
@@ -629,103 +632,34 @@ def run_leagues_command() -> int:
     return 0
 
 
+def run_cache_clean(cache_dir: Path, dry_run: bool) -> int:
+    """List legacy (non ``v2-``) cache files and delete them unless ``dry_run``."""
+    files = legacy_cache_files(cache_dir)
+    if not files:
+        print(f"No legacy cache files in {cache_dir}")
+        return 0
+    print(f"Legacy cache files in {cache_dir}:")
+    for path in files:
+        print(f"  {path.name}")
+    if dry_run:
+        print(f"Dry run: {len(files)} file(s) would be removed")
+        return 0
+    removed = 0
+    for path in files:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            print(f"Could not remove {path.name}: {exc}")
+    print(f"Removed {removed} of {len(files)} file(s)")
+    return 0 if removed == len(files) else 1
+
+
 def run_backtest(
     config: SimulationConfig, matchday_cutoff: int, export_snapshot: bool
 ) -> int:
-    """Run a basic backtest snapshot and then simulate from that point."""
-    tournament_id, _ = resolve_tournament_and_name(config)
-    client = make_client(config)
-    try:
-        try:
-            # A backtest replays played matches, so its default season is not the one
-            # a prediction would pick (which needs fixtures left to simulate).
-            selection = client.select_backtest_season(
-                tournament_id,
-                season_id=config.season_id,
-                season_year=config.season_year,
-            )
-            for warning in selection.warnings:
-                LOGGER.warning("%s", warning)
-            season_id = selection.season_id
-            if not season_id:
-                raise SystemExit("Could not resolve season for backtest.")
-            LOGGER.info(
-                "Backtesting season %s (id %s, %s)",
-                selection.season.get("name") or selection.season.get("year") or "?",
-                season_id,
-                selection.status,
-            )
-            snapshot = client.build_snapshot_from_cutoff(
-                tournament_id,
-                season_id,
-                matchday_cutoff=matchday_cutoff,
-            )
-            summary = client.data_summary(tournament_id, season_id)
-            snapshot.metadata.update(
-                {
-                    "snapshot_source": "live",
-                    "snapshot_timestamp": summary.get("fetched_at"),
-                    **summary,
-                }
-            )
-            final_table = client.get_league_table(tournament_id, season_id)
-        except (SofaScoreError, ValueError) as exc:
-            raise SystemExit(f"Error: {exc}") from exc
-        if final_table is None:
-            raise SystemExit("Could not load final standings for backtest evaluation.")
-        if export_snapshot:
-            snapshot_path = (
-                config.output_dir
-                / "snapshots"
-                / sanitize_path_segment(snapshot.league_name)
-                / f"{snapshot.snapshot_label}.json"
-            )
-            client.export_snapshot(snapshot, snapshot_path)
-            print(f"Saved snapshot to {snapshot_path}")
-    finally:
-        client.close()
-
-    run_config = replace(config, snapshot_file=None)
-    original_loader = load_snapshot
-
-    def load_backtest_snapshot(_: SimulationConfig) -> ReplaySnapshot:
-        return snapshot
-
-    globals()["load_snapshot"] = load_backtest_snapshot
-    try:
-        manifest = run_simulation(run_config)
-    finally:
-        globals()["load_snapshot"] = original_loader
-
-    expected_positions = {
-        row[0]: position for position, row in enumerate(final_table[1:], start=1)
-    }
-    simulated_summary = {
-        entry["team"]: entry["positions"]
-        for entry in manifest["position_probabilities"]
-    }
-    mean_expected_position = {
-        team: sum(int(pos) * probability for pos, probability in positions.items())
-        for team, positions in simulated_summary.items()
-    }
-    average_abs_position_error = sum(
-        abs(mean_expected_position[team] - expected_positions[team])
-        for team in expected_positions
-    ) / max(1, len(expected_positions))
-    backtest_report = {
-        "league_name": snapshot.league_name,
-        "season_id": snapshot.season_id,
-        "snapshot_label": snapshot.snapshot_label,
-        "completed_simulations": manifest["completed_simulations"],
-        "stop_reason": manifest["stop_reason"],
-        "average_abs_position_error": average_abs_position_error,
-        "actual_final_positions": expected_positions,
-        "expected_positions_from_simulation": mean_expected_position,
-    }
-    write_json(Path(manifest["run_directory"]) / "backtest.json", backtest_report)
-
-    print(json.dumps(backtest_report, indent=2))
-    return 0
+    """Refuse unsafe historical round-based evaluation."""
+    raise ValueError("Round-based backtest is deprecated; use python -m league_outcome_simulator.evaluation with an explicit UTC --origin")
 
 
 def add_network_arguments(parser: argparse.ArgumentParser) -> None:
@@ -770,7 +704,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-time", type=int, default=DEFAULT_MAX_TIME_SECONDS
     )
     simulate_parser.add_argument(
-        "--target-pp-error", type=float, default=DEFAULT_TARGET_PP_ERROR
+        "--target-pp-error", type=float, default=DEFAULT_TARGET_PP_ERROR,
+        help="Target mean Monte Carlo sampling SE in percentage points (not predictive accuracy)"
     )
     simulate_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     simulate_parser.add_argument("--seed", type=int)
@@ -812,7 +747,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     backtest_parser = subparsers.add_parser(
-        "backtest", help="Run a historical replay backtest"
+        "backtest", help="Deprecated and refused; use explicit-UTC evaluation instead"
     )
     backtest_parser.add_argument("league", help="League slug/name or tournament id")
     backtest_parser.add_argument("--league-id", type=int, dest="tournament_id")
@@ -822,7 +757,8 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_parser.add_argument("--max-simulations", type=int, default=250_000)
     backtest_parser.add_argument("--max-time", type=int, default=300)
     backtest_parser.add_argument(
-        "--target-pp-error", type=float, default=DEFAULT_TARGET_PP_ERROR
+        "--target-pp-error", type=float, default=DEFAULT_TARGET_PP_ERROR,
+        help="Target mean Monte Carlo sampling SE in percentage points (not predictive accuracy)"
     )
     backtest_parser.add_argument("--batch-size", type=int, default=25_000)
     backtest_parser.add_argument("--seed", type=int)
@@ -839,6 +775,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable automatic Rust build assistance when the extension is missing.",
     )
     backtest_parser.set_defaults(output_formats=["txt", "json"])
+
+    cache_parser = subparsers.add_parser("cache", help="Manage the SofaScore disk cache")
+    cache_subparsers = cache_parser.add_subparsers(dest="cache_command", required=True)
+    clean_parser = cache_subparsers.add_parser(
+        "clean",
+        help="Remove legacy (non 'v2-') files from the cache directory",
+    )
+    clean_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=DEFAULT_CACHE_DIR,
+        help=f"Cache directory (default: {DEFAULT_CACHE_DIR})",
+    )
+    clean_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List the files that would be removed without deleting anything",
+    )
 
     return parser
 
@@ -913,12 +867,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "leagues":
         return run_leagues_command()
 
+    if args.command == "cache":
+        return run_cache_clean(args.cache_dir, args.dry_run)
+
+    if args.command == "backtest":
+        parser.error("Round-based backtest is deprecated and refused: postponed matches can leak future results and unfinished tables are not final outcomes. Use python -m league_outcome_simulator.evaluation with --origin instead.")
     config = config_from_args(args)
     if args.command == "simulate":
         run_simulation(config)
         return 0
-    if args.command == "backtest":
-        return run_backtest(config, args.matchday_cutoff, args.export_snapshot)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
