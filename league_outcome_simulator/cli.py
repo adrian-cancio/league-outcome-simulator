@@ -9,17 +9,31 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
 from .catalog import LEAGUES_BY_INDEX, list_leagues, resolve_league_identifier
-from .data import ReplaySnapshot, SofaScoreClient
+from .data import (
+    DEFAULT_BASE_URL,
+    DEFAULT_IMPERSONATE,
+    SOURCE_SNAPSHOT,
+    STATUS_NOT_STARTED,
+    ReplaySnapshot,
+    SeasonSelection,
+    SeasonSelectionError,
+    SofaScoreClient,
+    SofaScoreError,
+    format_age,
+    iso_utc,
+    parse_iso_utc,
+)
 from .error_estimation import calculate_pp_error
 from .simulation import simulate_bulk
 from .utils import (
+    TEAM_ROW_HEADER,
     apply_result_to_split_tables,
     build_table_from_team_stats,
     choose_team_name,
@@ -68,6 +82,79 @@ class SimulationConfig:
     snapshot_file: Path | None
     what_if_results: tuple[str, ...]
     auto_build_rust: bool
+    base_url: str | None = None
+    impersonate: str | None = None
+
+
+def make_client(config: SimulationConfig) -> SofaScoreClient:
+    """Build a SofaScore client from the run configuration."""
+    return SofaScoreClient(
+        use_disk_cache=config.use_disk_cache,
+        force_refresh=config.force_refresh,
+        base_url=config.base_url,
+        impersonate=config.impersonate,
+    )
+
+
+def select_season_or_exit(
+    client: SofaScoreClient, tournament_id: int, config: SimulationConfig
+) -> SeasonSelection:
+    """Select the season to use, logging warnings and failing with a clear message."""
+    try:
+        selection = client.select_season(
+            tournament_id,
+            season_id=config.season_id,
+            season_year=config.season_year,
+        )
+    except SeasonSelectionError as exc:
+        raise SystemExit(str(exc)) from exc
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    except SofaScoreError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
+    for warning in selection.warnings:
+        LOGGER.warning("%s", warning)
+    LOGGER.info(
+        "Selected season %s (id %s, %s, %s matches played)",
+        selection.season.get("name") or selection.season.get("year") or "?",
+        selection.season_id,
+        selection.state.status,
+        selection.state.matches_played,
+    )
+    return selection
+
+
+def data_provenance(snapshot: ReplaySnapshot) -> dict[str, Any]:
+    """Summarize season and data origin (source, fetched-at, age) for reports."""
+    metadata = snapshot.metadata
+    season = metadata.get("season") or {}
+    fetched_at = metadata.get("fetched_at") or metadata.get("snapshot_timestamp")
+    fetched_ts = parse_iso_utc(fetched_at)
+    age_seconds = (
+        max(0.0, datetime.now(timezone.utc).timestamp() - fetched_ts)
+        if fetched_ts is not None
+        else None
+    )
+    return {
+        "season_name": season.get("name") or metadata.get("season_name"),
+        "season_year": season.get("year"),
+        "season_id": snapshot.season_id,
+        "data_source": metadata.get("data_source")
+        or (SOURCE_SNAPSHOT if metadata.get("snapshot_source") != "live" else "unknown"),
+        "fetched_at": fetched_at,
+        "data_age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+    }
+
+
+def provenance_lines(info: dict[str, Any]) -> list[str]:
+    """Render provenance as the header lines of simulation.txt."""
+    season = info["season_name"] or info["season_year"] or "unknown season"
+    age = info["data_age_seconds"]
+    age_text = f", age {format_age(age)}" if age is not None else ""
+    return [
+        f"Season: {season} (id {info['season_id']})",
+        f"Data source: {info['data_source']}, fetched at {info['fetched_at'] or 'unknown'}{age_text}",
+    ]
 
 
 def configure_logging(verbose: bool) -> None:
@@ -132,33 +219,71 @@ def resolve_tournament_and_name(config: SimulationConfig) -> tuple[int, str]:
 def load_live_snapshot(config: SimulationConfig) -> ReplaySnapshot:
     """Load a snapshot from SofaScore."""
     tournament_id, league_name = resolve_tournament_and_name(config)
-    client = SofaScoreClient(
-        use_disk_cache=config.use_disk_cache,
-        force_refresh=config.force_refresh,
-    )
+    client = make_client(config)
     try:
-        season_id = client.resolve_season_id(
-            tournament_id,
-            season_id=config.season_id,
-            season_year=config.season_year,
-        )
+        selection = select_season_or_exit(client, tournament_id, config)
+        season_id = selection.season_id
         if not season_id:
             raise SystemExit(
                 f"Could not resolve season for tournament {tournament_id}."
             )
 
-        base_table = client.get_league_table(tournament_id, season_id)
-        home_table = client.get_home_league_table(tournament_id, season_id)
-        away_table = client.get_away_league_table(tournament_id, season_id)
-        fixtures = client.get_remaining_fixtures(tournament_id, season_id)
-        team_colors = client.get_team_colors(tournament_id, season_id)
-        metadata = client.get_season_metadata(tournament_id, season_id)
+        try:
+            base_table = client.get_league_table(tournament_id, season_id)
+            home_table = client.get_home_league_table(tournament_id, season_id)
+            away_table = client.get_away_league_table(tournament_id, season_id)
+            fixtures = client.get_remaining_fixtures(tournament_id, season_id)
+            team_colors = client.get_team_colors(tournament_id, season_id)
+            metadata = client.get_season_metadata(tournament_id, season_id)
+        except SofaScoreError as exc:
+            raise SystemExit(f"Error: {exc}") from exc
+
+        summary = client.data_summary(tournament_id, season_id)
         metadata.update(
             {
                 "snapshot_source": "live",
-                "snapshot_timestamp": datetime.utcnow().isoformat() + "Z",
+                "snapshot_timestamp": summary.get("fetched_at")
+                or iso_utc(datetime.now(timezone.utc).timestamp()),
+                "season_status": selection.status,
+                "season_matches_played": selection.state.matches_played,
+                "season_pending_matches": selection.state.pending,
+                **summary,
             }
         )
+        if selection.state.pending:
+            LOGGER.warning(
+                "%s match(es) of this season are live, postponed or interrupted; they "
+                "are not simulated and no score is invented for them.",
+                selection.state.pending,
+            )
+        LOGGER.info(
+            "Data source: %s (%s network requests, %s cache hits); oldest data fetched %s, age %s",
+            summary.get("data_source"),
+            summary.get("network_requests"),
+            summary.get("cache_hits"),
+            summary.get("fetched_at"),
+            format_age(summary.get("data_age_seconds", 0)),
+        )
+
+        if (
+            not (base_table and home_table and away_table)
+            and selection.status == STATUS_NOT_STARTED
+            and fixtures
+        ):
+            # Before kick-off SofaScore may publish no standings yet: start everyone
+            # at zero, using the teams that appear in the fixture list.
+            LOGGER.warning(
+                "No standings published for the not-started season; "
+                "using an empty table built from the fixture list."
+            )
+            teams = sorted(
+                {fixture["h"]["title"] for fixture in fixtures}
+                | {fixture["a"]["title"] for fixture in fixtures}
+            )
+            empty = [TEAM_ROW_HEADER.copy(), *([team, 0, 0, 0, 0, 0, 0, 0] for team in teams)]
+            base_table = base_table or empty
+            home_table = home_table or [row.copy() for row in empty]
+            away_table = away_table or [row.copy() for row in empty]
 
         if not base_table or not home_table or not away_table:
             raise SystemExit("Could not fetch standings data from SofaScore.")
@@ -182,14 +307,22 @@ def load_live_snapshot(config: SimulationConfig) -> ReplaySnapshot:
 def load_snapshot(config: SimulationConfig) -> ReplaySnapshot:
     """Load snapshot either from file or live SofaScore."""
     if config.snapshot_file:
-        client = SofaScoreClient(
-            use_disk_cache=config.use_disk_cache,
-            force_refresh=config.force_refresh,
-        )
+        client = make_client(config)
         try:
             snapshot = client.load_snapshot(config.snapshot_file)
         finally:
             client.close()
+        snapshot.metadata["data_source"] = SOURCE_SNAPSHOT
+        snapshot.metadata.setdefault("fetched_at", snapshot.metadata.get("snapshot_timestamp"))
+        info = data_provenance(snapshot)
+        LOGGER.info(
+            "Data source: snapshot file %s (fetched %s, age %s)",
+            config.snapshot_file,
+            info["fetched_at"] or "unknown",
+            format_age(info["data_age_seconds"])
+            if info["data_age_seconds"] is not None
+            else "unknown",
+        )
         return snapshot
     return load_live_snapshot(config)
 
@@ -297,7 +430,16 @@ def run_simulation(config: SimulationConfig) -> dict[str, Any]:
     """Run the simulation end-to-end and return the run payload."""
     snapshot = apply_what_if_results(load_snapshot(config), config.what_if_results)
     if not snapshot.fixtures:
-        raise SystemExit("No fixtures left to simulate after applying overrides.")
+        pending = int(snapshot.metadata.get("season_pending_matches") or 0)
+        detail = (
+            f" {pending} match(es) are live, postponed or interrupted and have no "
+            "result yet; re-run once they are played or rescheduled."
+            if pending
+            else ""
+        )
+        raise SystemExit(
+            f"No fixtures left to simulate after applying overrides.{detail}"
+        )
 
     run_dir = build_run_directory(config.output_dir, snapshot.league_name)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -407,6 +549,7 @@ def run_simulation(config: SimulationConfig) -> dict[str, Any]:
     )
 
     processed_colors = process_team_colors(snapshot.team_colors)
+    provenance = data_provenance(snapshot)
     print_simulation_results(
         position_counts,
         num_simulations,
@@ -415,6 +558,7 @@ def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         run_dir,
         elapsed_time,
         len(snapshot.fixtures),
+        header_lines=provenance_lines(provenance),
     )
 
     image_file = None
@@ -432,6 +576,11 @@ def run_simulation(config: SimulationConfig) -> dict[str, Any]:
         "league_name": snapshot.league_name,
         "tournament_id": snapshot.tournament_id,
         "season_id": snapshot.season_id,
+        "season_name": provenance["season_name"],
+        "season_year": provenance["season_year"],
+        "data_source": provenance["data_source"],
+        "fetched_at": provenance["fetched_at"],
+        "data_age_seconds": provenance["data_age_seconds"],
         "seed": seed,
         "max_simulations": config.max_simulations,
         "completed_simulations": num_simulations,
@@ -485,24 +634,43 @@ def run_backtest(
 ) -> int:
     """Run a basic backtest snapshot and then simulate from that point."""
     tournament_id, _ = resolve_tournament_and_name(config)
-    client = SofaScoreClient(
-        use_disk_cache=config.use_disk_cache,
-        force_refresh=config.force_refresh,
-    )
+    client = make_client(config)
     try:
-        season_id = client.resolve_season_id(
-            tournament_id,
-            season_id=config.season_id,
-            season_year=config.season_year,
-        )
-        if not season_id:
-            raise SystemExit("Could not resolve season for backtest.")
-        snapshot = client.build_snapshot_from_cutoff(
-            tournament_id,
-            season_id,
-            matchday_cutoff=matchday_cutoff,
-        )
-        final_table = client.get_league_table(tournament_id, season_id)
+        try:
+            # A backtest replays played matches, so its default season is not the one
+            # a prediction would pick (which needs fixtures left to simulate).
+            selection = client.select_backtest_season(
+                tournament_id,
+                season_id=config.season_id,
+                season_year=config.season_year,
+            )
+            for warning in selection.warnings:
+                LOGGER.warning("%s", warning)
+            season_id = selection.season_id
+            if not season_id:
+                raise SystemExit("Could not resolve season for backtest.")
+            LOGGER.info(
+                "Backtesting season %s (id %s, %s)",
+                selection.season.get("name") or selection.season.get("year") or "?",
+                season_id,
+                selection.status,
+            )
+            snapshot = client.build_snapshot_from_cutoff(
+                tournament_id,
+                season_id,
+                matchday_cutoff=matchday_cutoff,
+            )
+            summary = client.data_summary(tournament_id, season_id)
+            snapshot.metadata.update(
+                {
+                    "snapshot_source": "live",
+                    "snapshot_timestamp": summary.get("fetched_at"),
+                    **summary,
+                }
+            )
+            final_table = client.get_league_table(tournament_id, season_id)
+        except (SofaScoreError, ValueError) as exc:
+            raise SystemExit(f"Error: {exc}") from exc
         if final_table is None:
             raise SystemExit("Could not load final standings for backtest evaluation.")
         if export_snapshot:
@@ -560,6 +728,24 @@ def run_backtest(
     return 0
 
 
+def add_network_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the SofaScore host/impersonation overrides to a subcommand."""
+    parser.add_argument(
+        "--base-url",
+        help=(
+            f"SofaScore API base URL to try first (default: {DEFAULT_BASE_URL}, "
+            "env SOFASCORE_BASE_URL). Other hosts are tried after an HTTP 403."
+        ),
+    )
+    parser.add_argument(
+        "--impersonate",
+        help=(
+            f"curl_cffi browser profile to try first (default: {DEFAULT_IMPERSONATE}, "
+            "env SOFASCORE_IMPERSONATE). Other profiles are tried after an HTTP 403."
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser."""
     parser = argparse.ArgumentParser(prog="league_outcome_simulator")
@@ -606,7 +792,12 @@ def build_parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--no-gui", action="store_true")
     simulate_parser.add_argument("--force-refresh", action="store_true")
     simulate_parser.add_argument("--no-disk-cache", action="store_true")
-    simulate_parser.add_argument("--snapshot-file", type=Path)
+    simulate_parser.add_argument(
+        "--snapshot-file",
+        type=Path,
+        help="Simulate from a saved snapshot instead of fetching from SofaScore.",
+    )
+    add_network_arguments(simulate_parser)
     simulate_parser.add_argument(
         "--set-result",
         dest="what_if_results",
@@ -641,6 +832,7 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_parser.add_argument("--no-gui", action="store_true")
     backtest_parser.add_argument("--no-disk-cache", action="store_true")
     backtest_parser.add_argument("--export-snapshot", action="store_true")
+    add_network_arguments(backtest_parser)
     backtest_parser.add_argument(
         "--no-auto-build-rust",
         action="store_true",
@@ -675,6 +867,8 @@ def config_from_args(args: argparse.Namespace) -> SimulationConfig:
         snapshot_file=getattr(args, "snapshot_file", None),
         what_if_results=tuple(getattr(args, "what_if_results", [])),
         auto_build_rust=not getattr(args, "no_auto_build_rust", False),
+        base_url=getattr(args, "base_url", None),
+        impersonate=getattr(args, "impersonate", None),
     )
 
 

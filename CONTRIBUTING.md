@@ -23,9 +23,11 @@ python -m maturin develop --release
 Run both Python and Rust tests before opening a PR:
 
 ```bash
-pytest
+python -m pytest -q
 cargo test --release
 ```
+
+Network access is mocked in the Python tests. The optional live smoke test runs only with `LOS_LIVE_TESTS=1 python -m pytest -m live -q`.
 
 ## Guidelines
 

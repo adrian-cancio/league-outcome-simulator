@@ -269,8 +269,12 @@ def print_simulation_results(
     run_dir,
     elapsed_time,
     num_fixtures,
+    header_lines=(),
 ):
-    """Print and persist simulation results in a readable format."""
+    """Print and persist simulation results in a readable format.
+
+    ``header_lines`` (season, data source, ...) are printed and written first.
+    """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     txt_file = run_dir / "simulation.txt"
@@ -288,6 +292,8 @@ def print_simulation_results(
     )
     header = "Final simulation results:"
 
+    for line in header_lines:
+        print(line)
     print(summary_line)
     print(stats_line_1)
     print(stats_line_2)
@@ -308,6 +314,8 @@ def print_simulation_results(
     max_prefix_len = max(len(prefix) for prefix in prefixes.values())
 
     with txt_file.open("w", encoding="utf-8") as handle:
+        for line in header_lines:
+            handle.write(line + "\n")
         handle.write(summary_line + "\n")
         handle.write(stats_line_1 + "\n")
         handle.write(stats_line_2 + "\n")

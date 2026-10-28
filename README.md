@@ -13,6 +13,48 @@ Rust-accelerated football league simulator that estimates the probability of eve
 - First backtesting workflow with historical cutoffs.
 - Python and Rust tests plus CI.
 
+## Data Source
+
+Data comes from SofaScore's JSON API over HTTP (`curl_cffi`, no browser automation, no proxies).
+
+- **Host and TLS profile.** `api.sofascore.com` now answers HTTP 403 (`"challenge"`) to Chrome-style clients. The default is `https://www.sofascore.com/api/v1` with the `safari17_0` impersonation profile, which serves the same JSON.
+- **Configurable.** `--base-url` / `--impersonate` (on `simulate` and `backtest`), the `SOFASCORE_BASE_URL` / `SOFASCORE_IMPERSONATE` environment variables, or the `SofaScoreClient(base_url=..., impersonate=...)` arguments. Order of precedence: argument/flag, environment, default.
+- **Fallback.** On HTTP 403 the client tries the other host and the other profiles (`safari18_0`, `safari15_5`, `chrome124`) before giving up, and remembers what worked. A 403 is treated as a block, not retried. If everything is blocked the run stops with an error that names the 403 challenge and suggests `--snapshot-file`.
+- **Offline.** `--snapshot-file` simulates from a saved snapshot (see `tests/fixtures/sample_snapshot.json`) and never touches the network.
+
+## Disk Cache
+
+Responses are cached in `.cache/sofascore/` as `v2-<hash>.json` files holding the URL, a fetched-at timestamp and the payload. The key is the API path (it contains the season id), so a new season can never reuse an old season's entries.
+
+| Data | Lifetime |
+| --- | --- |
+| Season list | 1 day |
+| Standings / fixtures of the current (unfinished) season | 30 minutes |
+| Season that finished more than 2 days ago | 30 days |
+| A season that finished less than 2 days ago | 30 minutes (the final table can still be corrected) |
+
+- Cache files from older versions (`<number>.json`, no metadata) are **never used** and never deleted; the run logs that they are ignored.
+- Expired, unreadable or future-dated entries are refetched.
+- `--force-refresh` skips the cache for the whole run (and rewrites it). `--no-disk-cache` neither reads nor writes it.
+- Every run logs where each piece of data came from, e.g. `Data from cache: /unique-tournament/54/seasons (fetched 2026-10-28T00:24:25Z, age 9s)`, plus one summary line (`Data source: network|cache|mixed ...`). `simulation.txt` starts with `Season:` and `Data source:` lines, and `manifest.json` / `results.json` record `season_name`, `season_id`, `data_source` (`network`, `cache`, `mixed` or `snapshot`), `fetched_at` (the oldest input) and `data_age_seconds`.
+
+## Season Selection
+
+With no `--season-id` / `--season-year`, the simulator inspects the three newest listed seasons, newest first, and applies this rule:
+
+1. The first season that is **in progress** (some matches played and fixtures remaining) is used. Newer seasons that have not started are skipped with a warning.
+2. If no season is in progress but the newest has **not started** and has fixtures scheduled, that season is simulated from an empty table, with a warning.
+3. If the newest season is **finished** (0 remaining fixtures) and nothing else qualifies, the run stops and tells you to pass `--season-year` (for example `25/26`) or `--season-id`. It never silently simulates an old season.
+
+An explicitly requested season is honoured, with a warning if it is finished or has not started (a finished season then ends with "No fixtures left to simulate"). An unknown `--season-id` or `--season-year` stops with an error that lists the newest available seasons.
+
+Details of the rule:
+
+- **Live, postponed or interrupted matches** (anything unplayed that is not simply scheduled) keep a season "in progress". They are never simulated and never given an invented score; the run warns about them. If only such matches remain, the run stops and says so. A match postponed more than 14 days ago no longer counts.
+- **No standings published** (HTTP 404 or an empty table) is treated as a season that has not started only when no match has been played: everyone then starts on zero, with the teams taken from the fixture list. Otherwise the run fails instead of simulating from zeros.
+- **`backtest` without `--season-year`/`--season-id`** replays the newest of the three newest seasons that has played matches (a finished season is ideal; an in-progress one is used with a warning). This is deliberately different from the prediction rule above, which wants fixtures left to simulate.
+- `data_source`, `fetched_at` and the request counts in the manifest describe only the season that was used, not seasons that were merely inspected while choosing.
+
 ## Install
 
 Requirements:
@@ -119,7 +161,8 @@ Each run creates a directory under `results/<league>/<date>/<time>/` with:
 
 The manifest includes:
 
-- tournament and season ids
+- tournament and season ids, season name
+- data source (`network` / `cache` / `mixed` / `snapshot`), fetched-at time and age
 - seed
 - stop reason
 - elapsed time
@@ -154,8 +197,16 @@ Install dev dependencies and run tests:
 
 ```bash
 pip install -e .[dev]
-pytest
+python -m pytest -q
 cargo test --release
+```
+
+The Python tests never touch the network: HTTP is mocked and the CLI is exercised end to end from `tests/fixtures/sample_snapshot.json` through the Rust extension (build it first with `python -m maturin develop --release`).
+
+One opt-in smoke test talks to the real SofaScore API (fetches `la-liga-2` and runs a short simulation in a temporary cache). It is skipped unless you ask for it:
+
+```bash
+LOS_LIVE_TESTS=1 python -m pytest -m live -q
 ```
 
 Rebuild the Rust extension manually if needed:

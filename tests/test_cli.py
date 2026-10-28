@@ -30,6 +30,7 @@ def test_simulate_snapshot_no_gui(tmp_path):
             "--plot",
             "off",
             "--no-gui",
+            "--no-auto-build-rust",
             "--output-dir",
             str(tmp_path),
         ]
@@ -60,6 +61,7 @@ def test_simulate_snapshot_with_what_if(tmp_path):
             "--plot",
             "off",
             "--no-gui",
+            "--no-auto-build-rust",
             "--output-dir",
             str(tmp_path),
         ]

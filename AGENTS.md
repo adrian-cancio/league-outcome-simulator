@@ -1,4 +1,4 @@
-# Copilot Instructions
+# Project Instructions
 
 ## Programming Language
 Use Python for all code examples.
